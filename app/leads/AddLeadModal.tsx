@@ -7,7 +7,19 @@ import { supabase } from "@/lib/supabase"
 const STATUS_OPTIONS = ["New", "Contacted", "Replied", "Interested", "Meeting Booked"]
 const TAG_OPTIONS = ["Hot", "Warm", "Cold"]
 
-export function AddLeadModal() {
+type LeadRow = { id: string; name: string | null; phone: string | null; email: string | null; website?: string | null; status: string | null; company: string | null }
+
+type Props = {
+  campaignId?: string
+  buttonClassName?: string
+  onSuccess?: (newLead?: LeadRow) => void
+  /** When true, button is disabled and submit is blocked (lead limit reached) */
+  isAtLimit?: boolean
+  /** Used for extra server-side safety check before insert */
+  targetLeads?: number
+}
+
+export function AddLeadModal({ campaignId, buttonClassName, onSuccess, isAtLimit, targetLeads }: Props) {
   const router = useRouter()
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -22,21 +34,33 @@ export function AddLeadModal() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
+    if (isAtLimit) {
+      setError("Lead limit reached")
+      return
+    }
+    if (campaignId && targetLeads != null) {
+      const { count } = await supabase.from("leads").select("*", { count: "exact", head: true }).eq("campaign_id", campaignId)
+      if ((count ?? 0) >= targetLeads) {
+        setError("Lead limit reached")
+        return
+      }
+    }
     setError(null)
     setSubmitting(true)
     try {
-      const { error: insertError } = await supabase.from("leads").insert([
-        {
-          name: form.name.trim() || null,
-          email: form.email.trim() || null,
-          company: form.company.trim() || null,
-          status: form.status,
-          tag: form.tag,
-        },
-      ])
+      const row: Record<string, unknown> = {
+        name: form.name.trim() || null,
+        email: form.email.trim() || null,
+        company: form.company.trim() || null,
+        status: form.status,
+        tag: form.tag,
+      }
+      if (campaignId) row.campaign_id = campaignId
+      const { data: inserted, error: insertError } = await supabase.from("leads").insert([row]).select("id, name, phone, email, website, status, company").single()
       if (insertError) throw insertError
       setForm({ name: "", email: "", company: "", status: "New", tag: "Warm" })
       setOpen(false)
+      if (inserted) onSuccess?.(inserted as LeadRow)
       router.refresh()
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to add lead")
@@ -57,7 +81,8 @@ export function AddLeadModal() {
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-zinc-100 transition shadow-lg shadow-black/20"
+        disabled={isAtLimit}
+        className={`${buttonClassName ?? "rounded-full bg-white px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-zinc-100 transition shadow-lg shadow-black/20"} ${isAtLimit ? "opacity-50 cursor-not-allowed" : ""}`}
       >
         Add Lead
       </button>

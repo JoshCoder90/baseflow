@@ -1,28 +1,71 @@
 import Link from "next/link"
 import { notFound } from "next/navigation"
 import { supabase } from "@/lib/supabase"
+import { CampaignDetailContent } from "../components/CampaignDetailContent"
 import { CampaignStatusBadge } from "../components/CampaignStatusBadge"
-import { CampaignDetailsEditor } from "../components/CampaignDetailsEditor"
 
 type Campaign = {
   id: string
   name?: string | null
   target_audience?: string | null
+  target_search_query?: string | null
+  lead_generation_status?: string | null
+  audience_id?: string | null
+  channel?: string | null
+  audiences?: {
+    id: string
+    name: string | null
+    niche: string | null
+    location: string | null
+    leads_collected?: number | null
+    target_leads?: number | null
+  } | null
   message_template?: string | null
   follow_up_schedule?: string | null
   status?: string | null
+  notes?: string | null
   created_at?: string | null
+}
+
+function getNicheLabel(campaign: Campaign): string {
+  if (campaign.target_search_query) {
+    const q = campaign.target_search_query.trim()
+    if (q.includes(" in ")) {
+      const [niche, loc] = q.split(/ in /i).map((s) => s.trim())
+      return niche && loc ? `${niche} • ${loc}` : q
+    }
+    return q
+  }
+  const a = campaign.audiences
+  if (a) return `${a.niche || a.name || "—"} • ${a.location || "—"}`
+  return campaign.target_audience ?? "—"
 }
 
 async function getCampaign(id: string): Promise<Campaign | null> {
   const { data, error } = await supabase
     .from("campaigns")
-    .select("*")
+    .select("*, audiences(id, name, niche, location, leads_collected, target_leads)")
     .eq("id", id)
     .single()
 
   if (error || !data) return null
   return data as Campaign
+}
+
+async function getLeadCount(campaignId: string, audienceId: string | null): Promise<number> {
+  const { count: byCampaign } = await supabase
+    .from("leads")
+    .select("id", { count: "exact", head: true })
+    .eq("campaign_id", campaignId)
+  if ((byCampaign ?? 0) > 0) return byCampaign ?? 0
+  if (audienceId) {
+    const { count: byAudience } = await supabase
+      .from("leads")
+      .select("id", { count: "exact", head: true })
+      .eq("audience_id", audienceId)
+    return byAudience ?? 0
+  }
+  return 0
 }
 
 export default async function CampaignDetailPage({
@@ -34,13 +77,8 @@ export default async function CampaignDetailPage({
   const campaign = await getCampaign(id)
   if (!campaign) notFound()
 
-  const created = campaign.created_at
-    ? new Date(campaign.created_at).toLocaleDateString("en-US", {
-        month: "long",
-        day: "numeric",
-        year: "numeric",
-      })
-    : "—"
+  const leadCount = await getLeadCount(campaign.id, campaign.audience_id ?? null)
+  const nicheLabel = getNicheLabel(campaign)
 
   return (
     <div className="flex-1 overflow-auto">
@@ -55,69 +93,19 @@ export default async function CampaignDetailPage({
           Back to campaigns
         </Link>
 
-        <header className="mb-8">
-          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
-            <div>
-              <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-white">
-                {campaign.name ?? "Untitled campaign"}
-              </h1>
-              <p className="mt-1 text-zinc-500">Created {created}</p>
-            </div>
+        <header className="mb-8 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-white">
+              {campaign.name ?? "Untitled campaign"}
+            </h1>
+            <p className="mt-1 text-sm text-zinc-500">{nicheLabel}</p>
+          </div>
+          <div className="flex items-center gap-3 shrink-0">
             <CampaignStatusBadge status={campaign.status} />
           </div>
         </header>
 
-        <div className="space-y-6">
-          <section className="rounded-2xl border border-zinc-800 bg-gradient-to-b from-zinc-900/80 to-zinc-950/80 p-6">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500 mb-4">
-              Campaign details
-            </h2>
-            <dl className="space-y-4">
-              <div>
-                <dt className="text-xs font-medium text-zinc-500 uppercase tracking-wider">
-                  Target audience
-                </dt>
-                <dd className="mt-1 text-sm text-zinc-200">
-                  {campaign.target_audience ?? "—"}
-                </dd>
-              </div>
-              <CampaignDetailsEditor
-                campaignId={campaign.id}
-                messageTemplate={campaign.message_template}
-                followUpSchedule={campaign.follow_up_schedule}
-                targetAudience={campaign.target_audience}
-              />
-            </dl>
-          </section>
-
-          <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500 mb-3">
-              Prospect list
-            </h2>
-            <p className="text-sm text-zinc-600">Coming soon</p>
-          </section>
-
-          <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500 mb-3">
-              Sending stats
-            </h2>
-            <p className="text-sm text-zinc-600">Coming soon</p>
-          </section>
-
-          <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500 mb-3">
-              Replies
-            </h2>
-            <p className="text-sm text-zinc-600">Coming soon</p>
-          </section>
-
-          <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500 mb-3">
-              Analytics
-            </h2>
-            <p className="text-sm text-zinc-600">Coming soon</p>
-          </section>
-        </div>
+        <CampaignDetailContent campaign={campaign} leadCount={leadCount} />
       </div>
     </div>
   )

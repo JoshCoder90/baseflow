@@ -1,0 +1,12 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/campaign-worker",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/send-messages",
+      "schedule": "* * * * *"
+    }
+  ]
+}

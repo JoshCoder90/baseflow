@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
+import { useRouter } from "next/navigation"
 import { supabase } from "@/lib/supabase"
 
 type LeadWithMessage = {
@@ -21,6 +22,7 @@ type Message = {
   id: string
   role: "outbound" | "inbound"
   content?: string | null
+  channel?: string | null
   created_at?: string | null
 }
 
@@ -29,6 +31,7 @@ type Props = {
 }
 
 export function InboxClient({ leads: initialLeads }: Props) {
+  const router = useRouter()
   const [leads, setLeads] = useState<LeadWithMessage[]>(initialLeads)
   const [selectedLead, setSelectedLead] = useState<LeadWithMessage | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
@@ -44,6 +47,9 @@ export function InboxClient({ leads: initialLeads }: Props) {
   useEffect(() => {
     setLeads(initialLeads)
   }, [initialLeads])
+
+  const leadIdsRef = useRef<Set<string>>(new Set(initialLeads.map((l) => l.id)))
+  leadIdsRef.current = new Set(leads.map((l) => l.id))
 
   useEffect(() => {
     const channel = supabase
@@ -66,7 +72,7 @@ export function InboxClient({ leads: initialLeads }: Props) {
     }
   }, [])
 
-  // When a lead message is inserted (from any source), mark that lead as unread
+  // When a message is inserted, update unread and add lead to inbox if not present
   useEffect(() => {
     const channel = supabase
       .channel("inbox-messages-insert-unread")
@@ -74,21 +80,28 @@ export function InboxClient({ leads: initialLeads }: Props) {
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "messages" },
         async (payload) => {
-          const row = payload.new as { lead_id?: string; role?: string }
-          const role = row?.role
+          const row = payload.new as { lead_id?: string; role?: string; content?: string | null }
           const leadId = row?.lead_id
-          if (!leadId || (role !== "lead" && role !== "inbound")) return
-          await supabase.from("leads").update({ unread: true }).eq("id", leadId)
-          setLeads((prev) =>
-            prev.map((l) => (l.id === leadId ? { ...l, unread: true } : l))
-          )
+          if (!leadId) return
+          const role = row?.role
+          if (role === "lead" || role === "inbound") {
+            await supabase.from("leads").update({ unread: true }).eq("id", leadId)
+          }
+          const isInList = leadIdsRef.current.has(leadId)
+          if (!isInList) {
+            router.refresh()
+          } else if (role === "lead" || role === "inbound") {
+            setLeads((prev) =>
+              prev.map((l) => (l.id === leadId ? { ...l, unread: true } : l))
+            )
+          }
         }
       )
       .subscribe()
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [])
+  }, [router])
 
   useEffect(() => {
     if (!selectedLead) {
@@ -157,7 +170,7 @@ export function InboxClient({ leads: initialLeads }: Props) {
         const reply = data.reply ?? ""
         const opts = reply
           .split(/OPTION \d+:\s*/i)
-          .map((s) => s.trim())
+          .map((s: string) => s.trim())
           .filter(Boolean)
         setSuggestions(opts.slice(0, 3))
       } catch {
@@ -236,7 +249,9 @@ export function InboxClient({ leads: initialLeads }: Props) {
         ))}
 
         {leads.length === 0 && (
-          <div className="p-4 text-sm text-gray-500">No leads yet</div>
+          <div className="p-4 text-sm text-gray-500">
+            No conversations yet. Start a campaign to begin messaging leads.
+          </div>
         )}
       </div>
 
@@ -259,17 +274,26 @@ export function InboxClient({ leads: initialLeads }: Props) {
                     {messages.map((msg) => (
                       <div
                         key={msg.id}
-                        className={`flex ${msg.role === "outbound" ? "justify-end" : "justify-start"}`}
+                        className={`flex flex-col ${msg.role === "outbound" ? "items-end" : "items-start"}`}
                       >
                         <div
-                          className={
-                            msg.role === "outbound"
-                              ? "bg-blue-600 text-white p-4 rounded-2xl rounded-br-md max-w-[min(85%,28rem)] text-base leading-relaxed"
-                              : "bg-neutral-800 text-white p-4 rounded-2xl rounded-bl-md max-w-[min(85%,28rem)] text-base leading-relaxed"
-                          }
+                          className={`flex ${msg.role === "outbound" ? "justify-end" : "justify-start"}`}
                         >
-                          {msg.content ?? "—"}
+                          <div
+                            className={
+                              msg.role === "outbound"
+                                ? "bg-blue-600 text-white p-4 rounded-2xl rounded-br-md max-w-[min(85%,28rem)] text-base leading-relaxed"
+                                : "bg-neutral-800 text-white p-4 rounded-2xl rounded-bl-md max-w-[min(85%,28rem)] text-base leading-relaxed"
+                            }
+                          >
+                            {msg.content ?? "—"}
+                          </div>
                         </div>
+                        {msg.role === "outbound" && (msg.channel === "sms" || msg.channel === "email") && (
+                          <span className="mt-1 text-[10px] uppercase tracking-wider text-zinc-500">
+                            {msg.channel}
+                          </span>
+                        )}
                       </div>
                     ))}
                     <div ref={messagesEndRef} />

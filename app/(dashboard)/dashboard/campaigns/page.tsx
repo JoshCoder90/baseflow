@@ -5,6 +5,9 @@ type Campaign = {
   id: string
   name?: string | null
   target_audience?: string | null
+  target_search_query?: string | null
+  audience_id?: string | null
+  audiences?: { id: string; name: string | null; niche: string | null; location: string | null } | null
   message_template?: string | null
   follow_up_schedule?: string | null
   status?: string | null
@@ -14,7 +17,7 @@ type Campaign = {
 async function getCampaigns(): Promise<Campaign[]> {
   const { data, error } = await supabase
     .from("campaigns")
-    .select("*")
+    .select("*, audiences(id, name, niche, location)")
     .order("created_at", { ascending: false })
 
   if (error) {

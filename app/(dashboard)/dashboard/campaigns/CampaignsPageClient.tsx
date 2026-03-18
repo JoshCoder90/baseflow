@@ -2,17 +2,22 @@
 
 import { useState } from "react"
 import { useRouter } from "next/navigation"
+import Link from "next/link"
 import { supabase } from "@/lib/supabase"
 import { CampaignCard } from "./components/CampaignCard"
+import { DeleteCampaignModal } from "./components/DeleteCampaignModal"
 import { EmptyCampaignState } from "./components/EmptyCampaignState"
-import { NewCampaignModal } from "./components/NewCampaignModal"
 
+type FollowUpStep = { day: number; type: string }
 type Campaign = {
   id: string
   name?: string | null
   target_audience?: string | null
+  target_search_query?: string | null
+  audience_id?: string | null
+  audiences?: { id: string; name: string | null; niche: string | null; location: string | null } | null
   message_template?: string | null
-  follow_up_schedule?: string | null
+  follow_up_schedule?: string | FollowUpStep[] | null
   status?: string | null
   created_at?: string | null
 }
@@ -24,15 +29,12 @@ type Props = {
 export function CampaignsPageClient({ initialCampaigns }: Props) {
   const router = useRouter()
   const [campaigns, setCampaigns] = useState<Campaign[]>(initialCampaigns)
-  const [modalOpen, setModalOpen] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<Campaign | null>(null)
 
-  async function handleModalClose() {
-    setModalOpen(false)
-    const { data } = await supabase
-      .from("campaigns")
-      .select("*")
-      .order("created_at", { ascending: false })
-    if (data) setCampaigns(data as Campaign[])
+  async function handleDeleteCampaign(campaignId: string) {
+    await supabase.from("campaigns").delete().eq("id", campaignId)
+    setCampaigns((prev) => prev.filter((c) => c.id !== campaignId))
+    setDeleteTarget(null)
     router.refresh()
   }
 
@@ -44,13 +46,12 @@ export function CampaignsPageClient({ initialCampaigns }: Props) {
             <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-white">Campaigns</h1>
             <p className="mt-1 text-zinc-500">Create and manage outbound campaigns</p>
           </div>
-          <button
-            type="button"
-            onClick={() => setModalOpen(true)}
+          <Link
+            href="/dashboard/campaigns/new"
             className="rounded-lg bg-white px-4 py-2.5 text-sm font-semibold text-zinc-900 hover:bg-zinc-100 transition shrink-0"
           >
             New Campaign
-          </button>
+          </Link>
         </header>
 
         <div className="grid grid-cols-4 gap-6 mb-8">
@@ -79,12 +80,16 @@ export function CampaignsPageClient({ initialCampaigns }: Props) {
         </div>
 
         {campaigns.length === 0 ? (
-          <EmptyCampaignState onNewCampaign={() => setModalOpen(true)} />
+          <EmptyCampaignState onNewCampaign={() => router.push("/dashboard/campaigns/new")} />
         ) : (
           <>
             <div className="grid gap-4 sm:grid-cols-2">
               {campaigns.map((campaign) => (
-                <CampaignCard key={campaign.id} campaign={campaign} />
+                <CampaignCard
+                  key={campaign.id}
+                  campaign={campaign}
+                  onDelete={(c) => setDeleteTarget(c)}
+                />
               ))}
             </div>
             {campaigns.length < 3 && (
@@ -92,20 +97,24 @@ export function CampaignsPageClient({ initialCampaigns }: Props) {
                 <p className="text-sm text-zinc-400">
                   You have {campaigns.length} campaign{campaigns.length === 1 ? "" : "s"}. Create another to diversify your outreach.
                 </p>
-                <button
-                  type="button"
-                  onClick={() => setModalOpen(true)}
-                  className="mt-3 text-sm font-medium text-blue-400 hover:text-blue-300 transition"
+                <Link
+                  href="/dashboard/campaigns/new"
+                  className="mt-3 text-sm font-medium text-blue-400 hover:text-blue-300 transition inline-block"
                 >
                   + New Campaign
-                </button>
+                </Link>
               </div>
             )}
           </>
         )}
       </div>
 
-      <NewCampaignModal open={modalOpen} onClose={handleModalClose} />
+      <DeleteCampaignModal
+        campaign={deleteTarget}
+        open={!!deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={handleDeleteCampaign}
+      />
     </div>
   )
 }

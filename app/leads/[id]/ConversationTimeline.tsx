@@ -2,6 +2,7 @@ type Message = {
   id: string
   role: "outbound" | "inbound"
   content?: string | null
+  channel?: string | null
   created_at?: string | null
 }
 
@@ -68,6 +69,7 @@ export function ConversationTimeline({ messages, embedded, messagesEndRef }: Pro
           >
             <span className="mb-1.5 text-xs font-medium text-zinc-500">
               {label}
+              {isOutbound && (msg.channel === "sms" || msg.channel === "email") && ` • ${msg.channel.toUpperCase()}`}
               {time && ` • ${time}`}
             </span>
             <div

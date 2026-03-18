@@ -1,17 +1,39 @@
 import { redirect } from "next/navigation"
 import Link from "next/link"
-import { supabase } from "@/lib/supabase"
+import { createClient } from "@/lib/supabase/server"
+import { getAccountHealth } from "@/lib/account-health"
 import { SidebarNav } from "./components/SidebarNav"
+import { AccountHealthWidget } from "./components/AccountHealthWidget"
 
 export default async function DashboardLayout({
   children,
 }: {
   children: React.ReactNode
 }) {
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) {
+  const supabase = await createClient()
+
+  const {
+    data: { session },
+  } = await supabase.auth.getSession()
+
+  if (!session) {
     redirect("/login")
   }
+
+  const user = session.user
+
+  const { data: gmailConn } = await supabase
+    .from("gmail_connections")
+    .select("gmail_connected_at, created_at")
+    .eq("user_id", user.id)
+    .maybeSingle()
+
+  const accountHealth = getAccountHealth({
+    created_at: user?.created_at,
+    gmail_connected_at:
+      (gmailConn?.gmail_connected_at as string | null | undefined) ??
+      (gmailConn?.created_at as string | null | undefined),
+  })
 
   return (
     <div className="h-screen min-h-0 flex bg-gradient-to-b from-zinc-950 via-zinc-900 to-zinc-950 text-white">
@@ -23,15 +45,12 @@ export default async function DashboardLayout({
           <p className="hidden lg:block text-xs text-zinc-500 mt-0.5 tracking-wide">Automation control</p>
         </div>
         <SidebarNav />
-        <div className="hidden lg:flex p-4 space-y-2 border-t border-zinc-800 flex-col">
+        <div className="hidden lg:flex p-4 space-y-2 border-t border-zinc-800 flex-col mt-auto">
           <div className="rounded-xl bg-zinc-800/50 px-4 py-3 border border-zinc-700/30">
             <p className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Plan</p>
             <p className="text-sm font-semibold text-white mt-0.5">Growth</p>
           </div>
-          <div className="rounded-xl bg-zinc-800/50 px-4 py-3 border border-zinc-700/30">
-            <p className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Health</p>
-            <p className="text-sm font-semibold text-emerald-400 mt-0.5">Good</p>
-          </div>
+          <AccountHealthWidget data={accountHealth} />
         </div>
       </aside>
 

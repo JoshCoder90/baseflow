@@ -13,17 +13,30 @@ type Lead = {
   [key: string]: unknown
 }
 
-async function getLeads(): Promise<Lead[]> {
-  const { data, error } = await supabase
+async function getLeadsWithMessages(): Promise<Lead[]> {
+  const { data: msgData, error: msgError } = await supabase
+    .from("messages")
+    .select("lead_id")
+
+  if (msgError) {
+    console.error("Messages fetch error:", msgError.message)
+    return []
+  }
+
+  const leadIds = [...new Set((msgData ?? []).map((m) => (m as { lead_id: string }).lead_id).filter(Boolean))]
+  if (leadIds.length === 0) return []
+
+  const { data: leads, error } = await supabase
     .from("leads")
     .select("*")
+    .in("id", leadIds)
     .order("created_at", { ascending: false })
 
   if (error) {
     console.error("Leads fetch error:", error.message)
     return []
   }
-  return (data ?? []) as Lead[]
+  return (leads ?? []) as Lead[]
 }
 
 async function getLatestMessagesByLead(): Promise<Record<string, string>> {
@@ -65,14 +78,14 @@ function getTemperature(score: number | null): string {
 
 export default async function InboxPage() {
   const [leads, latestMessages] = await Promise.all([
-    getLeads(),
+    getLeadsWithMessages(),
     getLatestMessagesByLead(),
   ])
 
   const leadsWithMeta = leads.map((lead) => {
     const score = parseLeadScore(lead.summary as string | null)
     const temperature = getTemperature(score)
-    const lastMessage = latestMessages[lead.id] ?? "No messages yet"
+    const lastMessage = latestMessages[lead.id] ?? "(New message)"
     return {
       ...lead,
       last_message: lastMessage,

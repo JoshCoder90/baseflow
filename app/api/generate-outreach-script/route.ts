@@ -42,7 +42,7 @@ Rules:
 • Under 60 words
 • Friendly tone
 • Ask for a quick call
-• Use placeholders {{name}} and {{company}}
+• Use placeholders {{first_name}} and {{company}}
 • Make it feel relevant to that industry
 
 Avoid generic wording like 'businesses like yours'.
