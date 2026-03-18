@@ -9,6 +9,14 @@ type QueueItem = {
   status: "pending" | "sent" | "failed"
   scheduled_for: string
   sent_at: string | null
+  step_number?: number
+}
+
+const STEP_LABELS: Record<number, string> = {
+  1: "Initial",
+  2: "Bump",
+  3: "Nudge",
+  4: "Final",
 }
 
 type Props = {
@@ -17,21 +25,22 @@ type Props = {
   campaignStatus?: string
 }
 
-function formatTime(iso: string): string {
-  const d = new Date(iso)
-  return d.toLocaleTimeString(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-  })
-}
+function formatTimeUntil(scheduledAt: string | null, now: number): string {
+  if (!scheduledAt) return "—"
+  const diffMs = new Date(scheduledAt).getTime() - now
+  if (diffMs <= 0) return "Sending now"
 
-function getTimeLeft(scheduledAt: string | null, now: number): string | null {
-  if (!scheduledAt) return null
-  const diff = new Date(scheduledAt).getTime() - now
-  if (diff <= 0) return "Sending..."
-  const minutes = Math.floor(diff / 60000)
-  const seconds = Math.floor((diff % 60000) / 1000)
-  return `${minutes}m ${seconds}s`
+  const totalMinutes = Math.floor(diffMs / (1000 * 60))
+  const totalHours = Math.floor(diffMs / (1000 * 60 * 60))
+  const days = Math.floor(totalHours / 24)
+
+  if (days >= 1) return `${days}d`
+
+  const hours = totalHours
+  const minutes = totalMinutes % 60
+
+  if (hours === 0) return `${minutes}m`
+  return `${hours}h ${minutes}m`
 }
 
 export function CampaignQueueTab({ campaignId, activeTab, campaignStatus }: Props) {
@@ -39,6 +48,7 @@ export function CampaignQueueTab({ campaignId, activeTab, campaignStatus }: Prop
   const [loading, setLoading] = useState(true)
   const [mounted, setMounted] = useState(false)
   const [now, setNow] = useState(Date.now())
+  const [activeStep, setActiveStep] = useState(1)
   const pollingRef = useRef(false)
 
   useEffect(() => {
@@ -60,7 +70,6 @@ export function CampaignQueueTab({ campaignId, activeTab, campaignStatus }: Prop
         const data = await res.json()
 
         setQueue((prev) => {
-          if (data?.skipped) return prev
           if (JSON.stringify(prev) === JSON.stringify(data)) return prev
           return Array.isArray(data) ? data : []
         })
@@ -70,7 +79,7 @@ export function CampaignQueueTab({ campaignId, activeTab, campaignStatus }: Prop
         setLoading(false)
       }
 
-      setTimeout(loop, 5000)
+      setTimeout(loop, 3000)
     }
 
     loop()
@@ -81,21 +90,43 @@ export function CampaignQueueTab({ campaignId, activeTab, campaignStatus }: Prop
   }, [])
 
   useEffect(() => {
-    if (!campaignId || campaignStatus !== "active") return
+    if (!campaignId || activeTab !== "queue") return
 
-    if (activeTab === "queue") {
-      startPolling()
-    } else {
-      pollingRef.current = false
+    const fetchQueue = async () => {
+      try {
+        setLoading(true)
+        const res = await fetch(`/api/queue?campaign_id=${campaignId}`)
+        const data = await res.json()
+
+        if (Array.isArray(data)) {
+          setQueue(data)
+        } else {
+          setQueue([])
+        }
+      } catch (err) {
+        console.error("QUEUE ERROR:", err)
+        setQueue([])
+      } finally {
+        setLoading(false)
+      }
     }
+
+    fetchQueue()
+  }, [campaignId, activeTab])
+
+  useEffect(() => {
+    if (!campaignId || (campaignStatus !== "active" && campaignStatus !== "sending")) return
+
+    startPolling()
 
     return () => {
       pollingRef.current = false
     }
-  }, [activeTab, campaignId, campaignStatus])
+  }, [campaignId, campaignStatus])
 
+  const filteredQueue = (queue || []).filter((i) => (i.step_number ?? 1) === activeStep)
   const nextPendingIso = (queue || []).find((i) => i.status === "pending")?.scheduled_for ?? null
-  const nextSendCountdown = getTimeLeft(nextPendingIso, now)
+  const nextSendCountdown = formatTimeUntil(nextPendingIso, now)
   const queued = (queue || []).filter((i) => i.status === "pending")
   const showTimes = mounted
   const sent = (queue || []).filter((i) => i.status === "sent")
@@ -113,7 +144,9 @@ export function CampaignQueueTab({ campaignId, activeTab, campaignStatus }: Prop
     return (
       <div className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 backdrop-blur-sm p-8 text-center">
         <p className="text-zinc-400">
-          Your messages will appear here once campaign starts
+          {campaignStatus === "completed"
+            ? "No messages found for this campaign"
+            : "Your messages will appear here once campaign starts"}
         </p>
       </div>
     )
@@ -135,7 +168,7 @@ export function CampaignQueueTab({ campaignId, activeTab, campaignStatus }: Prop
             <p className="text-xs font-medium uppercase tracking-wider text-zinc-500">Failed</p>
             <p className="text-xl font-semibold text-red-400 tabular-nums">{failed.length}</p>
           </div>
-          {showTimes && nextPendingIso && nextSendCountdown && (
+          {showTimes && nextPendingIso && (
             <div className="ml-auto">
               <p className="text-xs font-medium uppercase tracking-wider text-zinc-500">Next send in</p>
               <p className="text-lg font-semibold text-white">{nextSendCountdown}</p>
@@ -144,8 +177,38 @@ export function CampaignQueueTab({ campaignId, activeTab, campaignStatus }: Prop
         </div>
       </div>
 
+      <div className="flex gap-2 p-4 border-b border-zinc-800/80">
+        {[1, 2, 3, 4].map((step) => {
+          const count = (queue || []).filter((i) => (i.step_number ?? 1) === step).length
+          return (
+            <button
+              key={step}
+              type="button"
+              onClick={() => setActiveStep(step)}
+              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition ${
+                activeStep === step
+                  ? "bg-white text-zinc-900"
+                  : "bg-zinc-700/60 text-zinc-400 hover:text-zinc-200"
+              }`}
+            >
+              {STEP_LABELS[step] ?? `Step ${step}`}
+              {count > 0 && (
+                <span className={`ml-1.5 ${activeStep === step ? "text-zinc-600" : "text-zinc-500"}`}>
+                  ({count})
+                </span>
+              )}
+            </button>
+          )
+        })}
+      </div>
+
+      {!filteredQueue.length ? (
+        <div className="p-8 text-center">
+          <p className="text-zinc-500">No messages for this step</p>
+        </div>
+      ) : (
       <div className="divide-y divide-zinc-800/80">
-        {(queue || []).map((item) => (
+        {filteredQueue.map((item) => (
           <div
             key={item.id}
             className="flex flex-wrap items-center gap-4 p-4 hover:bg-zinc-800/30 transition-colors"
@@ -169,14 +232,22 @@ export function CampaignQueueTab({ campaignId, activeTab, campaignStatus }: Prop
                 {item.status === "failed" && "Failed"}
               </span>
               <span className="text-sm text-zinc-400">
-                {item.status === "pending" && (showTimes ? `Sends at ${formatTime(item.scheduled_for)}` : "Scheduled")}
-                {item.status === "sent" && item.sent_at && (showTimes ? `Sent at ${formatTime(item.sent_at)}` : "Sent")}
+                {item.status === "pending" &&
+                  (showTimes
+                    ? `Sending in: ${formatTimeUntil(item.scheduled_for, now)}`
+                    : "Scheduled")}
+                {item.status === "sent" &&
+                  item.sent_at &&
+                  (showTimes
+                    ? `Sent at ${new Date(item.sent_at).toLocaleTimeString()}`
+                    : "Sent")}
                 {item.status === "failed" && "Retry queued"}
               </span>
             </div>
           </div>
         ))}
       </div>
+      )}
     </div>
   )
 }

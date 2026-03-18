@@ -4,6 +4,7 @@ import { createClient } from "@supabase/supabase-js"
 import { createClient as createServerClient } from "@/lib/supabase/server"
 import { refreshGmailAccessToken } from "@/lib/gmail-auth"
 import { getAccountHealth } from "@/lib/account-health"
+import { personalizeMessage } from "@/lib/lead-personalization"
 
 const resend = new Resend(process.env.RESEND_API_KEY)
 
@@ -89,9 +90,163 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Campaign not found" }, { status: 404 })
     }
 
-    if (campaign.status === "sending") {
-      console.log("Campaign already sending - skipping duplicate run")
+    if (campaign.status === "active" || campaign.status === "sending") {
+      console.log("Campaign already active - skipping duplicate run")
       return NextResponse.json({ error: "Campaign already sending" }, { status: 409 })
+    }
+
+    // RESUME: If campaign has messages already, activate + queue new leads + backfill missing steps
+    const { data: existingMessagesResume } = await supabase
+      .from("campaign_messages")
+      .select("lead_id, step_number")
+      .eq("campaign_id", campaignId)
+
+    const existingLeadIds = new Set((existingMessagesResume ?? []).map((m) => m.lead_id))
+    const existingByLeadStep = new Map<string, Set<number>>()
+    for (const m of existingMessagesResume ?? []) {
+      const key = m.lead_id
+      if (!existingByLeadStep.has(key)) existingByLeadStep.set(key, new Set())
+      existingByLeadStep.get(key)!.add(m.step_number ?? 1)
+    }
+    const hasExistingMessages = existingLeadIds.size > 0
+
+    if (hasExistingMessages) {
+      console.log("RESUME: Campaign has existing messages — activating, queueing new leads, backfilling missing steps")
+
+      let { data: leadsResume } = await supabase
+        .from("leads")
+        .select("*")
+        .eq("campaign_id", campaignId)
+
+      if ((!leadsResume || leadsResume.length === 0) && campaign.audience_id) {
+        const res = await supabase.from("leads").select("*").eq("audience_id", campaign.audience_id)
+        leadsResume = res.data
+      }
+
+      const newLeads = (leadsResume ?? []).filter(
+        (lead: { id: string; email?: string; status?: string }) =>
+          !!lead.email &&
+          lead.status !== "messaged" &&
+          !existingLeadIds.has(lead.id)
+      )
+
+      if (newLeads.length > 0) {
+        const messageTemplate = campaign.message_template?.trim() || "Hey {{first_name}}, I wanted to reach out. Would love to connect!"
+        type FollowUpStep = { day: number; type: string; template?: string }
+        function parseFollowUpSchedule(raw: string | null | undefined): FollowUpStep[] {
+          if (!raw || typeof raw !== "string") return []
+          try {
+            const parsed = JSON.parse(raw)
+            return Array.isArray(parsed) ? parsed : []
+          } catch {
+            return []
+          }
+        }
+        const followUps = parseFollowUpSchedule(campaign.follow_up_schedule)
+
+        type QueueStep = { delayDays: number; step: number; template: string }
+        const steps: QueueStep[] = [
+          { delayDays: 0, step: 1, template: messageTemplate },
+        ]
+        for (let j = 0; j < followUps.length; j++) {
+          const fu = followUps[j]
+          const delayDays = fu.day >= 1 ? fu.day : [2, 4][j] ?? 4
+          steps.push({
+            delayDays,
+            step: j + 2,
+            template: (fu.template?.trim() || messageTemplate) as string,
+          })
+        }
+
+        const nowResume = new Date()
+        let insertedCount = 0
+        for (const lead of newLeads) {
+          for (const { delayDays, step, template } of steps) {
+            const messageBody = personalizeMessage(template, lead)
+            const sendAtResume = new Date(
+              nowResume.getTime() + delayDays * 24 * 60 * 60 * 1000
+            ).toISOString()
+            const { error: insertErr } = await supabase.from("campaign_messages").insert({
+              lead_id: lead.id,
+              campaign_id: campaignId,
+              step_number: step,
+              channel: "email",
+              message_body: messageBody,
+              send_at: sendAtResume,
+              status: "pending",
+            })
+            if (!insertErr) insertedCount++
+          }
+        }
+        console.log("RESUME: Queued new leads:", newLeads.length, "messages:", insertedCount)
+      }
+
+      // Backfill missing steps for existing leads (e.g. step 1 sent but steps 2–4 never added)
+      const allLeadsWithMessages = (leadsResume ?? []).filter((l: { id: string }) =>
+        existingLeadIds.has(l.id)
+      )
+      const eligibleForBackfill = allLeadsWithMessages.filter(
+        (l: { email?: string; status?: string }) => !!l.email && l.status !== "messaged"
+      )
+      if (eligibleForBackfill.length > 0) {
+        const messageTemplateBf = campaign.message_template?.trim() || "Hey {{first_name}}, I wanted to reach out. Would love to connect!"
+        type FollowUpStepBf = { day: number; type: string; template?: string }
+        function parseFollowUpBf(raw: string | null | undefined): FollowUpStepBf[] {
+          if (!raw || typeof raw !== "string") return []
+          try {
+            const parsed = JSON.parse(raw)
+            return Array.isArray(parsed) ? parsed : []
+          } catch {
+            return []
+          }
+        }
+        const followUpsBf = parseFollowUpBf(campaign.follow_up_schedule)
+        type QueueStepBf = { delayDays: number; step: number; template: string }
+        const stepsBf: QueueStepBf[] = [{ delayDays: 0, step: 1, template: messageTemplateBf }]
+        for (let j = 0; j < followUpsBf.length; j++) {
+          const fu = followUpsBf[j]
+          const delayDays = fu.day >= 1 ? fu.day : [2, 4, 7][j] ?? 7
+          stepsBf.push({
+            delayDays,
+            step: j + 2,
+            template: (fu.template?.trim() || messageTemplateBf) as string,
+          })
+        }
+
+        let backfillCount = 0
+        const nowBf = new Date()
+        for (const lead of eligibleForBackfill) {
+          const existingSteps = existingByLeadStep.get(lead.id) ?? new Set()
+          for (const { delayDays, step, template } of stepsBf) {
+            if (existingSteps.has(step)) continue
+            const messageBody = personalizeMessage(template, lead)
+            const sendAt = new Date(
+              nowBf.getTime() + delayDays * 24 * 60 * 60 * 1000
+            ).toISOString()
+            const { error: insertErr } = await supabase.from("campaign_messages").insert({
+              lead_id: lead.id,
+              campaign_id: campaignId,
+              step_number: step,
+              channel: "email",
+              message_body: messageBody,
+              send_at: sendAt,
+              status: "pending",
+            })
+            if (!insertErr) backfillCount++
+          }
+        }
+        if (backfillCount > 0) {
+          console.log("RESUME: Backfilled missing steps:", backfillCount, "messages")
+        }
+      }
+
+      await supabase.from("campaigns").update({ status: "active" }).eq("id", campaignId)
+      return NextResponse.json({
+        success: true,
+        resumed: true,
+        newLeadsQueued: newLeads.length,
+        message: "Campaign resumed. Pending emails will send gradually.",
+      })
     }
 
     const { data: gmailConn } = await supabase
@@ -178,17 +333,6 @@ export async function POST(req: NextRequest) {
     }
     const followUps = parseFollowUpSchedule(campaign.follow_up_schedule)
 
-    function personalizeMessage(
-      template: string,
-      lead: { name?: string | null; company?: string | null }
-    ): string {
-      const firstName = (lead.name ?? "").split(/\s+/)[0] || (lead.name ?? "there")
-      return template
-        .replace(/\{\{first_name\}\}/gi, firstName)
-        .replace(/\{\{name\}\}/gi, lead.name ?? "")
-        .replace(/\{\{company\}\}/gi, lead.company ?? "")
-    }
-
     const { dailyLimit: DAILY_LIMIT } = getAccountHealth({
       created_at: user?.created_at,
       gmail_connected_at:
@@ -240,7 +384,7 @@ export async function POST(req: NextRequest) {
     ]
     for (let j = 0; j < followUps.length; j++) {
       const fu = followUps[j]
-      const delayDays = fu.day >= 1 ? fu.day : [3, 7, 14][j] ?? 7
+      const delayDays = fu.day >= 1 ? fu.day : [2, 4, 7][j] ?? 7
       steps.push({
         delayDays,
         step: j + 2,
@@ -271,7 +415,9 @@ export async function POST(req: NextRequest) {
         }
 
         const messageBody = personalizeMessage(template, lead)
-        const sendAt = new Date().toISOString()
+        const sendAt = new Date(
+          baseForLead.getTime() + delayDays * 24 * 60 * 60 * 1000
+        ).toISOString()
 
         if (existing) {
           const { error: updateError } = await supabase

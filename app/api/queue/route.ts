@@ -39,19 +39,17 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Campaign not found" }, { status: 404 })
   }
 
-  if (campaign?.status !== "active") {
-    return NextResponse.json({ skipped: true })
-  }
-
-  try {
-    await processQueue()
-  } catch (e) {
-    console.error("Queue process error:", e)
+  if (campaign?.status === "active" || campaign?.status === "sending") {
+    try {
+      await processQueue()
+    } catch (e) {
+      console.error("Queue process error:", e)
+    }
   }
 
   const { data: messages, error: messagesError } = await supabase
     .from("campaign_messages")
-    .select("id, lead_id, status, send_at, sent_at")
+    .select("id, lead_id, status, send_at, sent_at, step_number")
     .eq("campaign_id", campaignId)
     .order("send_at", { ascending: true })
 
@@ -76,6 +74,7 @@ export async function GET(req: NextRequest) {
       status: m.status as "pending" | "sent" | "failed",
       scheduled_for: m.send_at,
       sent_at: m.sent_at,
+      step_number: m.step_number ?? 1,
     }
   })
 

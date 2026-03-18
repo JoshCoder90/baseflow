@@ -1,6 +1,36 @@
 "use client"
 
+import { useState, useEffect } from "react"
 import { CampaignStatusBadge } from "./CampaignStatusBadge"
+
+function formatTimeUntil(sendAt: string | null): string {
+  if (!sendAt) return "—"
+  try {
+    const now = new Date()
+    const target = new Date(sendAt)
+    const diffMs = target.getTime() - now.getTime()
+
+    if (diffMs <= 0) return "Sending now"
+
+    const totalMinutes = Math.floor(diffMs / (1000 * 60))
+    const totalHours = Math.floor(diffMs / (1000 * 60 * 60))
+    const days = Math.floor(totalHours / 24)
+
+    if (days >= 1) {
+      return `${days}d`
+    }
+
+    const hours = totalHours
+    const minutes = totalMinutes % 60
+
+    if (hours === 0) {
+      return `${minutes}m`
+    }
+    return `${hours}h ${minutes}m`
+  } catch {
+    return "—"
+  }
+}
 
 type Props = {
   status: string
@@ -32,26 +62,6 @@ function PhaseBadge({ phase }: { phase: string }) {
   )
 }
 
-function formatNextMessage(at: string | null): string {
-  if (!at) return "—"
-  try {
-    const d = new Date(at)
-    const now = new Date()
-    const isToday = d.toDateString() === now.toDateString()
-    if (isToday) {
-      return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
-    }
-    return d.toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    })
-  } catch {
-    return "—"
-  }
-}
-
 export function CampaignActivity({
   status,
   currentPhase,
@@ -60,6 +70,15 @@ export function CampaignActivity({
   nextScheduledAt,
   leadsRemaining,
 }: Props) {
+  const [, setRefresh] = useState(false)
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setRefresh((prev) => !prev)
+    }, 60000)
+    return () => clearInterval(interval)
+  }, [])
+
   return (
     <div className="rounded-xl border border-zinc-700/60 bg-zinc-800/40 p-5">
       <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500 mb-4">
@@ -84,7 +103,7 @@ export function CampaignActivity({
         </div>
         <div>
           <p className="text-xs text-zinc-500 mb-1">Next Scheduled Message</p>
-          <p className="text-sm font-medium text-white">{formatNextMessage(nextScheduledAt)}</p>
+          <p className="text-sm font-medium text-white tabular-nums">{formatTimeUntil(nextScheduledAt)}</p>
         </div>
         <div>
           <p className="text-xs text-zinc-500 mb-1">Leads Remaining</p>

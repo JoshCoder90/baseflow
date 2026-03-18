@@ -89,6 +89,7 @@ export function CampaignDetailContent({ campaign, leadCount }: Props) {
     repliesCount: number
     nextScheduledAt: string | null
     currentPhase: string
+    pendingCount?: number
     uniqueLeadsContacted: number
     leadsRemaining: number
   } | null>(null)
@@ -123,11 +124,13 @@ export function CampaignDetailContent({ campaign, leadCount }: Props) {
   }, [campaignId])
 
   useEffect(() => {
-    const id = setInterval(() => {
+    if (!showLeadSection || leadGenStatus !== "generating") return
+
+    const interval = setInterval(() => {
       fetchLeadsRef.current?.()
     }, 3000)
-    return () => clearInterval(id)
-  }, [campaignId])
+    return () => clearInterval(interval)
+  }, [campaignId, showLeadSection, leadGenStatus])
 
   useEffect(() => {
     if (lastFetchedCampaignId.current === campaignId) return
@@ -139,12 +142,20 @@ export function CampaignDetailContent({ campaign, leadCount }: Props) {
         const res = await fetch(`/api/campaigns/${campaignId}/tabs`)
         if (res.ok) {
           const json = await res.json()
+          if (
+            (json.pendingCount ?? 0) === 0 &&
+            (json.sendingStats?.messagesSent ?? 0) > 0 &&
+            (campaign?.status === "active" || campaign?.status === "sending")
+          ) {
+            router.refresh()
+          }
           setTabsData({
             sendingStats: { messagesSent: 0, failedSends: 0, replyRate: 0, dailySent: 0, dailyLimit: 100, ...json.sendingStats },
             replies: json.replies ?? [],
             repliesCount: json.analytics?.replies ?? json.replies?.length ?? 0,
             nextScheduledAt: json.nextScheduledAt ?? null,
             currentPhase: json.currentPhase ?? "Initial Messages",
+            pendingCount: json.pendingCount ?? 0,
             uniqueLeadsContacted: json.uniqueLeadsContacted ?? 0,
             leadsRemaining: json.leadsRemaining ?? 0,
           })
@@ -408,10 +419,18 @@ export function CampaignDetailContent({ campaign, leadCount }: Props) {
       {/* Campaign Activity - when active or paused */}
       {showActivity && tabsData && (
         <CampaignActivity
-          status={status === "running" ? "active" : status}
+          status={
+            status === "running" && (tabsData.pendingCount ?? 0) === 0
+              ? "completed"
+              : status === "running"
+                ? "active"
+                : status
+          }
           currentPhase={
             status === "running"
-              ? "Sending..."
+              ? (tabsData.pendingCount ?? 0) === 0
+                ? "Completed"
+                : "Sending..."
               : status === "paused"
                 ? "Paused"
                 : campaign.status === "completed"
@@ -426,8 +445,12 @@ export function CampaignDetailContent({ campaign, leadCount }: Props) {
       )}
 
       {/* Status text */}
-      {status === "running" && <p className="text-sm text-green-400">Sending messages...</p>}
-      {status === "paused" && <p className="text-sm text-yellow-400">Campaign paused</p>}
+      {status === "running" && (
+        <p className="text-sm text-green-400">
+          {(tabsData?.pendingCount ?? 0) === 0 ? "Completed" : "Sending..."}
+        </p>
+      )}
+      {status === "paused" && <p className="text-sm text-yellow-400">Paused — click Resume to continue</p>}
       {status === "draft" && <p className="text-sm text-zinc-500">Ready to start</p>}
       {tabsData?.sendingStats?.dailyLimit != null && (
         <p className="text-sm text-zinc-400">
@@ -437,7 +460,7 @@ export function CampaignDetailContent({ campaign, leadCount }: Props) {
 
       {/* Action buttons */}
       <div className="flex flex-wrap gap-2 items-center">
-        {status === "running" ? (
+        {status === "running" && (tabsData?.pendingCount ?? 1) > 0 ? (
           <button
             type="button"
             onClick={handleStop}
@@ -446,21 +469,29 @@ export function CampaignDetailContent({ campaign, leadCount }: Props) {
           >
             Stop Sending
           </button>
+        ) : status === "running" && tabsData && (tabsData.pendingCount ?? 0) === 0 ? (
+          <p className="text-sm text-zinc-400">Campaign completed</p>
         ) : (
           <>
             <button
               type="button"
               onClick={handleStart}
-              disabled={isLoading || !isReady}
+              disabled={isLoading || (!isReady && status === "draft")}
               className={`px-4 py-2 rounded font-medium text-sm transition ${
-                isReady
+                isReady || status === "paused"
                   ? "bg-green-500 hover:bg-green-600 text-white disabled:opacity-50"
                   : "bg-zinc-600 text-zinc-400 cursor-not-allowed opacity-50"
               }`}
             >
-              {isLoading ? "Starting…" : "Start Sending Messages"}
+              {isLoading
+                ? status === "paused"
+                  ? "Resuming…"
+                  : "Starting…"
+                : status === "paused"
+                  ? "Resume Campaign"
+                  : "Start Sending Messages"}
             </button>
-            {!isReady && (
+            {!isReady && status === "draft" && (
               <p className="text-sm text-yellow-400 mt-1 ml-1">
                 Finish scraping emails before sending
               </p>

@@ -43,7 +43,7 @@ export async function GET(
 
   const { data: campaign, error: campaignError } = await supabase
     .from("campaigns")
-    .select("id, user_id, audience_id, follow_up_schedule")
+    .select("id, user_id, audience_id, follow_up_schedule, status")
     .eq("id", campaignId)
     .single()
 
@@ -166,6 +166,20 @@ export async function GET(
         : nextStepEarly != null && PHASE_EARLY[nextStepEarly]
           ? PHASE_EARLY[nextStepEarly]
           : "Initial Messages"
+
+    const { data: campaignEarly } = await supabase
+      .from("campaigns")
+      .select("status")
+      .eq("id", campaignId)
+      .single()
+    if (
+      (campaignEarly?.status === "active" || campaignEarly?.status === "sending") &&
+      pending.length === 0 &&
+      (sent ?? 0) > 0
+    ) {
+      await supabase.from("campaigns").update({ status: "completed" }).eq("id", campaignId)
+    }
+
     return NextResponse.json({
       leads: [],
       totalLeads: 0,
@@ -175,6 +189,7 @@ export async function GET(
       analytics: { messagesSent: sent ?? 0, replies: 0, interestedLeads: 0, meetingsBooked: 0, replyRate: 0 },
       nextScheduledAt: nextPendingEmpty?.send_at ?? null,
       currentPhase: currentPhaseEarly,
+      pendingCount: pending.length,
       leadsRemaining: 0,
     })
   }
@@ -292,6 +307,15 @@ export async function GET(
         ? PHASE_BY_STEP[nextStep]
         : "Initial Messages"
 
+  const pendingCount = pending.length
+  if (
+    (campaign.status === "active" || campaign.status === "sending") &&
+    pendingCount === 0 &&
+    (sent ?? 0) > 0
+  ) {
+    await supabase.from("campaigns").update({ status: "completed" }).eq("id", campaignId)
+  }
+
   return NextResponse.json({
     leads: prospects,
     sendingStats: {
@@ -315,6 +339,7 @@ export async function GET(
     },
     nextScheduledAt,
     currentPhase,
+    pendingCount,
     totalLeads,
     uniqueLeadsContacted,
     leadsRemaining: remainingLeads,

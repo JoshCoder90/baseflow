@@ -58,6 +58,17 @@ export function AddLeadModal({ campaignId, buttonClassName, onSuccess, isAtLimit
       if (campaignId) row.campaign_id = campaignId
       const { data: inserted, error: insertError } = await supabase.from("leads").insert([row]).select("id, name, phone, email, website, status, company").single()
       if (insertError) throw insertError
+      if (campaignId && inserted?.email) {
+        try {
+          await fetch(`/api/campaigns/${campaignId}/queue-lead`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ leadId: inserted.id }),
+          })
+        } catch {
+          // Non-blocking: lead is saved, queue can be retried
+        }
+      }
       setForm({ name: "", email: "", company: "", status: "New", tag: "Warm" })
       setOpen(false)
       if (inserted) onSuccess?.(inserted as LeadRow)

@@ -1,11 +1,17 @@
 /**
  * Queue worker: processes campaign_messages queue and sends emails.
  * Called once per API request (/api/queue or /api/send-messages) — no internal loop.
+ *
+ * Toggle USE_REAL_QUEUE to switch between test and real queue (no schema changes).
  */
 
 import { createClient } from "@supabase/supabase-js"
 import { refreshGmailAccessToken } from "@/lib/gmail-auth"
 import { getAccountHealth } from "@/lib/account-health"
+import { personalizeMessage } from "@/lib/lead-personalization"
+
+/** Set to true to use real queue. Keep false for safe rollout. */
+const USE_REAL_QUEUE = false
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY || ""
@@ -19,7 +25,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function getRandomDelay(): number {
-  return Math.floor(Math.random() * (30000 - 10000 + 1)) + 10000 // 10s → 30s
+  return Math.floor(45000 + Math.random() * 30000) // 45–75 seconds between sends
 }
 
 async function sendViaGmail(
@@ -60,7 +66,7 @@ async function sendViaGmail(
   }
 }
 
-export async function processQueue(): Promise<number> {
+async function processQueue_TEST(): Promise<number> {
   if (isProcessing) return 0
   if (!supabaseServiceKey) {
     throw new Error("SUPABASE_SERVICE_KEY missing")
@@ -244,11 +250,10 @@ export async function processQueue(): Promise<number> {
       continue
     }
 
-    const firstName = (lead?.name ?? "").split(/\s+/)[0] || (lead?.name ?? "there")
-    const text = (message.message_body ?? "")
-      .replace(/\{\{first_name\}\}/gi, firstName)
-      .replace(/\{\{name\}\}/gi, lead?.name ?? "")
-      .replace(/\{\{company\}\}/gi, lead?.company ?? "")
+    const text = personalizeMessage(message.message_body ?? "", {
+      name: lead?.name,
+      company: lead?.company,
+    })
     const baseSubject = campaign.subject?.trim() || "Quick question"
     const subject = message.step_number > 1 ? `Re: ${baseSubject}` : baseSubject
     const htmlBody = text.includes("<") ? text : `<p>${text.replace(/\n/g, "<br />")}</p>`
@@ -285,8 +290,9 @@ export async function processQueue(): Promise<number> {
       sentThisRun++
       console.log("SENT:", message.id)
 
-      const delay = getRandomDelay()
-      await sleep(delay)
+      const delayMs = getRandomDelay()
+      console.log("Waiting before next send:", delayMs, "ms")
+      await sleep(delayMs)
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err)
       console.error("SEND ERROR:", err)
@@ -304,4 +310,158 @@ export async function processQueue(): Promise<number> {
   } finally {
     isProcessing = false
   }
+}
+
+async function processQueue_REAL(): Promise<number> {
+  if (isProcessing) return 0
+  if (!supabaseServiceKey) {
+    throw new Error("SUPABASE_SERVICE_KEY missing")
+  }
+
+  console.log("REAL QUEUE START")
+  isProcessing = true
+
+  try {
+    const supabase = createClient(supabaseUrl, supabaseServiceKey)
+    const now = new Date().toISOString()
+
+    const { data: jobs, error } = await supabase
+      .from("campaign_messages")
+      .select("id, campaign_id, lead_id, message_body, step_number")
+      .eq("status", "pending")
+      .lte("send_at", now)
+      .order("send_at", { ascending: true })
+      .limit(10)
+
+    if (error) {
+      console.error("REAL QUEUE FETCH ERROR:", error)
+      return 0
+    }
+
+    if (!jobs?.length) {
+      console.log("REAL QUEUE: No jobs found")
+      return 0
+    }
+
+    let sentThisRun = 0
+    for (const job of jobs) {
+      try {
+        const { data: campaign } = await supabase
+          .from("campaigns")
+          .select("id, user_id, subject, status")
+          .eq("id", job.campaign_id)
+          .single()
+
+        if (!campaign || (campaign.status !== "active" && campaign.status !== "sending")) {
+          continue
+        }
+
+        const userId = campaign.user_id as string
+        const { data: gmailConn } = await supabase
+          .from("gmail_connections")
+          .select("access_token, refresh_token, gmail_email")
+          .eq("user_id", userId)
+          .maybeSingle()
+
+        if (!gmailConn) {
+          await supabase
+            .from("campaign_messages")
+            .update({ status: "failed", error_message: "No Gmail connected" })
+            .eq("id", job.id)
+          continue
+        }
+
+        let accessToken = gmailConn.access_token as string | undefined
+        if (gmailConn.refresh_token) {
+          try {
+            accessToken = await refreshGmailAccessToken(gmailConn.refresh_token)
+            await supabase
+              .from("gmail_connections")
+              .update({ access_token: accessToken, updated_at: new Date().toISOString() })
+              .eq("user_id", userId)
+          } catch {
+            accessToken = gmailConn.access_token as string | undefined
+          }
+        }
+
+        if (!accessToken || !gmailConn.gmail_email) {
+          await supabase
+            .from("campaign_messages")
+            .update({ status: "failed", error_message: "Gmail token invalid" })
+            .eq("id", job.id)
+          continue
+        }
+
+        const { data: lead } = await supabase
+          .from("leads")
+          .select("*")
+          .eq("id", job.lead_id)
+          .single()
+
+        if (!lead?.email) {
+          await supabase
+            .from("campaign_messages")
+            .update({ status: "failed", error_message: "Lead has no email" })
+            .eq("id", job.id)
+          continue
+        }
+
+        const text = personalizeMessage(job.message_body ?? "", {
+          name: lead?.name,
+          company: lead?.company,
+        })
+        const baseSubject = campaign.subject?.trim() || "Quick question"
+        const subject = job.step_number > 1 ? `Re: ${baseSubject}` : baseSubject
+        const htmlBody = text.includes("<") ? text : `<p>${text.replace(/\n/g, "<br />")}</p>`
+
+        console.log("REAL QUEUE: Sending to:", lead.email)
+        await sendViaGmail(
+          accessToken,
+          gmailConn.gmail_email,
+          lead.email,
+          subject,
+          htmlBody
+        )
+
+        await supabase
+          .from("campaign_messages")
+          .update({ status: "sent", sent_at: new Date().toISOString() })
+          .eq("id", job.id)
+
+        await supabase
+          .from("leads")
+          .update({
+            status: "messaged",
+            messages_sent: (lead.messages_sent ?? 0) + 1,
+            last_message_sent_at: new Date().toISOString(),
+          })
+          .eq("id", lead.id)
+
+        sentThisRun++
+        console.log("REAL QUEUE SUCCESS:", lead.email)
+
+        const delayMs = getRandomDelay()
+        console.log("Waiting before next send:", delayMs, "ms")
+        await sleep(delayMs)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error("REAL QUEUE FAILED:", msg)
+        await supabase
+          .from("campaign_messages")
+          .update({ status: "failed", error_message: msg })
+          .eq("id", job.id)
+      }
+    }
+
+    return sentThisRun
+  } finally {
+    isProcessing = false
+  }
+}
+
+export async function processQueue(): Promise<number> {
+  if (USE_REAL_QUEUE) {
+    return processQueue_REAL()
+  }
+  return processQueue_TEST()
 }

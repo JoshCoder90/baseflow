@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import { createClient } from "@supabase/supabase-js"
 import { Resend } from "resend"
+import { personalizeMessage } from "@/lib/lead-personalization"
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY || ""
@@ -52,11 +53,7 @@ function compileMessage(
   template: string,
   lead: { name?: string | null; company?: string | null }
 ): string {
-  const firstName = (lead.name ?? "").split(/\s+/)[0] || lead.name ?? ""
-  return template
-    .replace(/\{\{first_name\}\}/gi, firstName)
-    .replace(/\{\{name\}\}/gi, lead.name ?? "")
-    .replace(/\{\{company\}\}/gi, lead.company ?? "")
+  return personalizeMessage(template, lead)
 }
 
 /** Campaign worker: runs every minute, sends outreach emails to leads */

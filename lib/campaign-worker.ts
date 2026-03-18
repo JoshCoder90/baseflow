@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js"
 import { Resend } from "resend"
+import { personalizeMessage } from "@/lib/lead-personalization"
 
 const MAX_EMAILS_PER_RUN = 10
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
@@ -60,11 +61,7 @@ export async function runCampaignWorker(campaignId?: string): Promise<number> {
     for (const lead of leads) {
       if (sentThisRun >= MAX_EMAILS_PER_RUN) break
 
-      const firstName = (lead.name || "").split(/\s+/)[0] || lead.name || ""
-      const compiledHtml = template
-        .replace(/\{\{first_name\}\}/gi, firstName)
-        .replace(/\{\{name\}\}/gi, lead.name || "")
-        .replace(/\{\{company\}\}/gi, lead.company || "")
+      const compiledHtml = personalizeMessage(template, lead)
 
       try {
         console.log("Sending email to", lead.email)

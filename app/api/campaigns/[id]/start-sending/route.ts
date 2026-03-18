@@ -1,23 +1,13 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createClient } from "@supabase/supabase-js"
 import { Resend } from "resend"
+import { personalizeMessage } from "@/lib/lead-personalization"
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL || "",
   process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ""
 )
 const resend = new Resend(process.env.RESEND_API_KEY)
-
-function personalizeMessage(
-  template: string,
-  lead: { name?: string | null; company?: string | null }
-): string {
-  const firstName = (lead.name ?? "").split(/\s+/)[0] || (lead.name ?? "there")
-  return template
-    .replace(/\{\{first_name\}\}/gi, firstName)
-    .replace(/\{\{name\}\}/gi, lead.name ?? "")
-    .replace(/\{\{company\}\}/gi, lead.company ?? "")
-}
 
 export async function POST(
   req: NextRequest,
