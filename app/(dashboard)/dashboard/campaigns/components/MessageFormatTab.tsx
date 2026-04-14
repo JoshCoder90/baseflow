@@ -4,9 +4,7 @@ import { CampaignDetailsEditor } from "./CampaignDetailsEditor"
 
 type Campaign = {
   id: string
-  channel?: string | null
   message_template?: string | null
-  follow_up_schedule?: string | null
   subject?: string | null
   target_search_query?: string | null
   target_audience?: string | null
@@ -26,9 +24,7 @@ export function MessageFormatTab({ campaign, targetLabel, onSaved }: Props) {
   return (
     <CampaignDetailsEditor
       campaignId={campaign.id}
-      channel={campaign.channel}
       messageTemplate={campaign.message_template ?? null}
-      followUpSchedule={campaign.follow_up_schedule ?? null}
       subject={campaign.subject ?? null}
       targetAudience={targetLabel}
       audienceNiche={audienceNiche}

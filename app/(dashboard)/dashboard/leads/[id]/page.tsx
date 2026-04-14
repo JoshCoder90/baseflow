@@ -1,6 +1,7 @@
 import Link from "next/link"
-import { notFound } from "next/navigation"
-import { supabase } from "@/lib/supabase"
+import { notFound, redirect } from "next/navigation"
+import { createClient } from "@/lib/supabase/server"
+import { loadLeadForDashboardPage } from "@/lib/load-lead-for-dashboard"
 import { SummaryBlock } from "@/app/leads/[id]/SummaryBlock"
 import { LeadOverviewCard } from "@/app/leads/[id]/LeadOverviewCard"
 import { ConversationReplySection } from "@/app/leads/[id]/ConversationReplySection"
@@ -8,33 +9,25 @@ import { QuickActions } from "@/app/leads/[id]/QuickActions"
 import { DealPipeline } from "@/app/leads/[id]/DealPipeline"
 import { InternalNotes } from "@/app/leads/[id]/InternalNotes"
 
-type Lead = {
-  id: string
-  name?: string | null
-  email?: string | null
-  company?: string | null
-  status?: string | null
-  tag?: string | null
-  summary?: string | null
-  deal_stage?: string | null
-  internal_notes?: string | null
-  [key: string]: unknown
-}
-
-async function getLead(id: string): Promise<Lead | null> {
-  const { data, error } = await supabase.from("leads").select("*").eq("id", id).single()
-  if (error || !data) return null
-  return data as Lead
-}
-
 export default async function LeadProfilePage({
   params,
 }: {
   params: Promise<{ id: string }>
 }) {
   const { id } = await params
-  const lead = await getLead(id)
-  if (!lead) notFound()
+  const supabase = await createClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  if (!user?.id) {
+    redirect("/login")
+  }
+
+  const lead = await loadLeadForDashboardPage(supabase, id, user.id)
+  if (!lead) {
+    notFound()
+  }
 
   return (
     <div className="flex-1 overflow-auto p-4 sm:p-6 lg:p-8">
@@ -54,7 +47,7 @@ export default async function LeadProfilePage({
         <div className="grid gap-6 lg:grid-cols-3">
           <div className="lg:col-span-2 flex flex-col gap-6">
             <SummaryBlock leadId={id} initialSummary={lead.summary} />
-            <ConversationReplySection leadId={id} />
+            <ConversationReplySection leadId={id} campaignId={lead.campaign_id as string | null} />
           </div>
 
           <div className="lg:col-span-1 space-y-6">

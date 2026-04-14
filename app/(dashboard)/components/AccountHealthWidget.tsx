@@ -15,9 +15,19 @@ type Props = {
   data: AccountHealthData
 }
 
+function statusDescription(status: string): string {
+  if (status === "Optimized") {
+    return "Sending reputation is strong"
+  }
+  if (status === "At Risk") {
+    return "High activity detected — slow down"
+  }
+  return "Warming up sending capacity"
+}
+
 export function AccountHealthWidget({ data }: Props) {
   const [showHealthModal, setShowHealthModal] = useState(false)
-  const { status, dailyLimit, daysActive, nextLimit, nextUpgradeDay, daysUntilUpgrade } = data
+  const { status } = data
 
   const statusLabel =
     status === "Warming Up"
@@ -26,10 +36,11 @@ export function AccountHealthWidget({ data }: Props) {
         ? "🟢 Stable"
         : status === "Healthy"
           ? "🟢 Healthy"
-          : "🚀 Optimized"
+          : status === "At Risk"
+            ? "🔴 At Risk"
+            : "🚀 Optimized"
 
-  const progressPercent =
-    nextUpgradeDay != null ? Math.min((daysActive / nextUpgradeDay) * 100, 100) : 100
+  const description = statusDescription(status)
 
   return (
     <>
@@ -41,12 +52,7 @@ export function AccountHealthWidget({ data }: Props) {
           Account Health
         </p>
         <p className="text-sm font-semibold">{statusLabel}</p>
-        <p className="text-xs text-zinc-400 mt-1">Limit: {dailyLimit}/day</p>
-        {nextLimit != null && daysUntilUpgrade > 0 && (
-          <p className="text-xs text-zinc-500 mt-1">
-            {nextLimit}/day in {daysUntilUpgrade}d
-          </p>
-        )}
+        <p className="text-xs text-zinc-400 mt-1.5 leading-relaxed">{description}</p>
       </div>
 
       {showHealthModal && (
@@ -60,42 +66,8 @@ export function AccountHealthWidget({ data }: Props) {
           >
             <h2 className="text-lg font-semibold mb-4">Account Health</h2>
 
-            <p className="text-sm text-zinc-400">
-              We gradually increase your sending limit to protect your Gmail
-              account from being flagged as spam.
-            </p>
-
-            <div className="mt-4 space-y-2">
-              <p>
-                Status: <span className="font-semibold">{statusLabel}</span>
-              </p>
-              <p>Daily Limit: {dailyLimit} emails</p>
-              <p>Days Active: {daysActive}</p>
-
-              {nextLimit != null && (
-                <p className="text-sm text-zinc-400">
-                  Next upgrade: {nextLimit} emails/day in {daysUntilUpgrade} day
-                  {daysUntilUpgrade !== 1 ? "s" : ""}
-                </p>
-              )}
-              {!nextLimit && (
-                <p className="text-green-400 text-sm">You&apos;re fully optimized 🚀</p>
-              )}
-            </div>
-
-            {nextUpgradeDay != null && (
-              <div className="mt-4 h-2 bg-zinc-800 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-green-500 transition-all"
-                  style={{ width: `${progressPercent}%` }}
-                />
-              </div>
-            )}
-
-            <div className="mt-4 text-xs text-zinc-500">
-              Sending too many emails too quickly can get your account flagged.
-              This system keeps your emails landing in inboxes.
-            </div>
+            <p className="text-sm font-semibold text-white mb-1">{statusLabel}</p>
+            <p className="text-sm text-zinc-400 leading-relaxed">{description}</p>
 
             <button
               onClick={() => setShowHealthModal(false)}

@@ -1,7 +1,14 @@
 import dotenv from "dotenv"
+import { rateLimitResponse } from "@/lib/rateLimit"
 dotenv.config({ path: ".env.local" })
 
 import { NextResponse } from "next/server"
+import {
+  INPUT_MAX,
+  validateOptionalInt,
+  validateText,
+} from "@/lib/api-input-validation"
+import { heavyRouteIpLimitResponse } from "@/lib/ip-rate-limit"
 import OpenAI from "openai"
 
 export const runtime = "nodejs"
@@ -19,17 +26,45 @@ const STEP_TYPE_LABELS: Record<string, string> = {
 }
 
 export async function POST(req: Request) {
+  const _ip = heavyRouteIpLimitResponse(req, "generate-follow-up")
+  if (_ip) return _ip
+
+  const _rl = rateLimitResponse(req)
+  if (_rl) return _rl
+
   try {
     if (!process.env.OPENAI_API_KEY) {
       return NextResponse.json({ error: "OPENAI_API_KEY missing" }, { status: 500 })
     }
-    const { niche, initialMessage, stepType, day } = await req.json()
-    if (!niche || !niche.trim()) {
-      return NextResponse.json({ error: "niche required" }, { status: 400 })
-    }
+    const bodyRaw = await req.json()
+    const vn = validateText(bodyRaw.niche, {
+      required: true,
+      maxLen: INPUT_MAX.short,
+      field: "niche",
+    })
+    if (!vn.ok) return vn.response
+    const vim = validateText(bodyRaw.initialMessage, {
+      required: false,
+      maxLen: INPUT_MAX.medium,
+      field: "initialMessage",
+    })
+    if (!vim.ok) return vim.response
+    const vst = validateText(bodyRaw.stepType, {
+      required: false,
+      maxLen: 50,
+      field: "stepType",
+    })
+    if (!vst.ok) return vst.response
+    const vd = validateOptionalInt(bodyRaw.day, "day", 1, 366)
+    if (!vd.ok) return vd.response
+
+    const niche = vn.value
+    const initialMessage = vim.value
+    const stepType = vst.value
+    const day = vd.value
 
     const stepLabel = STEP_TYPE_LABELS[stepType] ?? stepType ?? "Follow-up"
-    const stepTypeLower = (stepType ?? "").toString().toLowerCase()
+    const stepTypeLower = stepType.toLowerCase()
     const isShortBump = stepTypeLower === "nudge" || stepTypeLower === "bump"
 
     const systemPrompt = isShortBump

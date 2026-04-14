@@ -1,16 +1,19 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createClient } from "@/lib/supabase/server"
+import { validateUuid, validateUuidList } from "@/lib/api-input-validation"
+import { rateLimitResponse } from "@/lib/rateLimit"
 
 export async function POST(req: NextRequest) {
-  const body = await req.json()
-  const { audience_id: audienceId, lead_ids: leadIds } = body
+  const _rl = rateLimitResponse(req)
+  if (_rl) return _rl
 
-  if (!audienceId || !Array.isArray(leadIds) || leadIds.length === 0) {
-    return NextResponse.json(
-      { error: "audience_id and lead_ids (array) are required" },
-      { status: 400 }
-    )
-  }
+  const body = await req.json()
+  const va = validateUuid(body.audience_id, "audience_id")
+  if (!va.ok) return va.response
+  const audienceId = va.value
+  const vl = validateUuidList(body.lead_ids, "lead_ids", 500)
+  if (!vl.ok) return vl.response
+  const leadIds = vl.value
 
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()

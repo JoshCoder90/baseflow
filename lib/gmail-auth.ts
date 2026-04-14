@@ -1,3 +1,31 @@
+import type { SupabaseClient } from "@supabase/supabase-js"
+
+/** Refresh token revoked or expired — clear stored tokens and require reconnect. */
+export class GmailReconnectRequiredError extends Error {
+  constructor(message = "GMAIL_RECONNECT_REQUIRED") {
+    super(message)
+    this.name = "GmailReconnectRequiredError"
+  }
+}
+
+export function isGmailReconnectRequiredError(err: unknown): boolean {
+  return err instanceof GmailReconnectRequiredError
+}
+
+export async function clearGmailTokensForReconnect(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<void> {
+  await supabase
+    .from("gmail_connections")
+    .update({
+      access_token: null,
+      refresh_token: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("user_id", userId)
+}
+
 /**
  * Refresh Google OAuth access token using refresh token.
  * Use before sending emails to avoid 401 Invalid Credentials.
@@ -23,6 +51,9 @@ export async function refreshGmailAccessToken(refreshToken: string): Promise<str
 
   if (!res.ok) {
     const err = await res.text()
+    if (err.includes("invalid_grant")) {
+      throw new GmailReconnectRequiredError()
+    }
     throw new Error(`Token refresh failed: ${res.status} ${err}`)
   }
 

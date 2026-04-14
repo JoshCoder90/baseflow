@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js"
 import { Resend } from "resend"
 import { personalizeMessage } from "@/lib/lead-personalization"
+import { isValidEmail } from "@/lib/email-send-filter"
 
 const MAX_EMAILS_PER_RUN = 10
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
@@ -66,6 +67,20 @@ export async function runCampaignWorker(campaignId?: string): Promise<number> {
       try {
         console.log("Sending email to", lead.email)
 
+        const recipientCheck = await isValidEmail(lead.email)
+        if (!recipientCheck.ok) {
+          if (recipientCheck.reason === "filtered") {
+            console.log(`Filtered out bad email: ${lead.email}`)
+          } else {
+            console.log(`Skipped invalid email: ${lead.email}`)
+          }
+          await supabase
+            .from("leads")
+            .update({ status: "invalid_email", next_send_at: null })
+            .eq("id", lead.id)
+          continue
+        }
+
         const { error } = await resend.emails.send({
           from: "BaseFlow <hello@gobaseflow.com>",
           to: lead.email,
@@ -81,12 +96,11 @@ export async function runCampaignWorker(campaignId?: string): Promise<number> {
         await supabase
           .from("leads")
           .update({
-            status: "messaged",
-            messages_sent: 1,
-            last_message_sent_at: new Date().toISOString(),
+            status: "sent",
           })
           .eq("id", lead.id)
 
+        console.log("✅ UPDATED LEAD:", lead.id)
         sentThisRun++
       } catch (err) {
         console.error("Send failed for", lead.email, err)

@@ -1,6 +1,7 @@
 import Link from "next/link"
-import { notFound } from "next/navigation"
-import { supabase } from "@/lib/supabase"
+import { notFound, redirect } from "next/navigation"
+import { createClient } from "@/lib/supabase/server"
+import { loadLeadForDashboardPage } from "@/lib/load-lead-for-dashboard"
 import { SummaryBlock } from "./SummaryBlock"
 import { LeadOverviewCard } from "./LeadOverviewCard"
 import { ConversationReplySection } from "./ConversationReplySection"
@@ -8,36 +9,28 @@ import { QuickActions } from "./QuickActions"
 import { DealPipeline } from "./DealPipeline"
 import { InternalNotes } from "./InternalNotes"
 
-type Lead = {
-  id: string
-  name?: string | null
-  email?: string | null
-  company?: string | null
-  status?: string | null
-  tag?: string | null
-  summary?: string | null
-  deal_stage?: string | null
-  internal_notes?: string | null
-  [key: string]: unknown
-}
-
-async function getLead(id: string): Promise<Lead | null> {
-  const { data, error } = await supabase.from("leads").select("*").eq("id", id).single()
-  if (error || !data) return null
-  return data as Lead
-}
-
 export default async function LeadProfilePage({
   params,
 }: {
   params: Promise<{ id: string }>
 }) {
   const { id } = await params
-  const lead = await getLead(id)
-  if (!lead) notFound()
+  const supabase = await createClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  if (!user?.id) {
+    redirect("/login")
+  }
+
+  const lead = await loadLeadForDashboardPage(supabase, id, user.id)
+  if (!lead) {
+    notFound()
+  }
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-zinc-950 via-zinc-900 to-zinc-950 text-white flex flex-col lg:flex-row">
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-gradient-to-b from-zinc-950 via-zinc-900 to-zinc-950 text-white lg:flex-row">
       {/* Sidebar */}
       <aside className="w-full lg:w-64 flex-shrink-0 bg-zinc-900/98 border-b lg:border-b-0 lg:border-r border-zinc-800/80 flex flex-row lg:flex-col">
         <div className="p-4 lg:p-6 border-b-0 lg:border-b border-r lg:border-r-0 border-zinc-800/80 flex items-center lg:block">
@@ -96,7 +89,7 @@ export default async function LeadProfilePage({
             {/* Left column: Summary, Conversation+Reply card, AI Reply Suggestion */}
             <div className="lg:col-span-2 space-y-6 min-h-0">
               <SummaryBlock leadId={id} initialSummary={lead.summary} />
-              <ConversationReplySection leadId={id} />
+              <ConversationReplySection leadId={id} campaignId={lead.campaign_id as string | null} />
             </div>
 
             {/* Right column: Quick Actions, Deal Pipeline, Internal Notes */}

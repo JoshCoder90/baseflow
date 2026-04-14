@@ -1,14 +1,29 @@
 import { NextRequest, NextResponse } from "next/server"
+import { INPUT_MAX, validateText } from "@/lib/api-input-validation"
+import { heavyRouteIpLimitResponse } from "@/lib/ip-rate-limit"
+import { rateLimitResponse } from "@/lib/rateLimit"
 
 export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url)
-  const input = searchParams.get("input")?.trim()
+  const _ip = heavyRouteIpLimitResponse(req, "places-search-business")
+  if (_ip) return _ip
 
-  if (!input || input.length < 1) {
+  const _rl = rateLimitResponse(req)
+  if (_rl) return _rl
+
+  const { searchParams } = new URL(req.url)
+  const rawInput = searchParams.get("input")
+  if (rawInput == null || rawInput.trim() === "") {
     return NextResponse.json({ predictions: [] })
   }
+  const vi = validateText(rawInput, {
+    required: true,
+    maxLen: INPUT_MAX.short,
+    field: "input",
+  })
+  if (!vi.ok) return vi.response
+  const input = vi.value
 
-  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_PLACES_API_KEY
+  const apiKey = process.env.GOOGLE_PLACES_API_KEY
   if (!apiKey) {
     return NextResponse.json({ predictions: [] })
   }

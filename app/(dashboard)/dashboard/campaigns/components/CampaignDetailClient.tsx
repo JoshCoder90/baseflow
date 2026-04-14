@@ -2,27 +2,9 @@
 
 import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
-import { supabase } from "@/lib/supabase"
 import { CampaignStatusBadge } from "./CampaignStatusBadge"
 import { CampaignDetailsEditor } from "./CampaignDetailsEditor"
 import { CampaignProgressBar } from "./CampaignProgressBar"
-
-const TYPE_LABELS: Record<string, string> = {
-  bump: "Bump",
-  nudge: "Nudge",
-  followup: "Follow-Up",
-  final: "Final Check-in",
-}
-
-function parseFollowUps(raw: string | null | undefined): { day: number; type: string; template?: string }[] {
-  if (raw == null) return []
-  try {
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : []
-  } catch {
-    return []
-  }
-}
 
 type Campaign = {
   id: string
@@ -39,7 +21,6 @@ type Campaign = {
     leads_collected?: number | null
   } | null
   message_template?: string | null
-  follow_up_schedule?: string | null
   subject?: string | null
   status?: string | null
 }
@@ -60,65 +41,6 @@ function getTargetLabel(campaign: Campaign): string {
   return campaign.target_audience ?? "—"
 }
 
-function FollowUpTimeline({ steps, initialMessage }: { steps: { day: number; type: string; template?: string }[]; initialMessage?: string | null }) {
-  const [expanded, setExpanded] = useState<Set<number>>(new Set([1]))
-
-  function toggle(day: number) {
-    setExpanded((prev) => {
-      const next = new Set(prev)
-      if (next.has(day)) next.delete(day)
-      else next.add(day)
-      return next
-    })
-  }
-
-  const allSteps = [
-    { day: 1, type: "Initial Message", template: initialMessage ?? undefined },
-    ...steps,
-  ]
-
-  return (
-    <div className="relative">
-      <div className="absolute left-[11px] top-2 bottom-2 w-px bg-zinc-700/80" />
-      <div className="space-y-0">
-        {allSteps.map((step, i) => {
-          const isExpanded = expanded.has(step.day)
-          return (
-            <div key={`${step.day}-${i}`} className="relative pl-10 pb-6 last:pb-0">
-              <div className="absolute left-0 top-1 w-[22px] h-[22px] rounded-full bg-zinc-800 border-2 border-blue-500 flex items-center justify-center">
-                <span className="text-[10px] font-semibold text-blue-400">{step.day}</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => toggle(step.day)}
-                className="w-full flex items-center justify-between gap-3 rounded-xl border border-zinc-700/80 bg-zinc-800/50 px-4 py-3 text-left hover:bg-zinc-800/70 transition"
-              >
-                <span className="text-sm font-medium text-white">Day {step.day}</span>
-                <span className="text-sm text-zinc-400">{TYPE_LABELS[step.type] ?? step.type}</span>
-                <svg
-                  className={`w-4 h-4 text-zinc-500 transition-transform ${isExpanded ? "rotate-180" : ""}`}
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                </svg>
-              </button>
-              {isExpanded && (
-                <div className="mt-2 rounded-xl border border-zinc-700/60 bg-zinc-900/60 px-4 py-3">
-                  <p className="text-sm text-zinc-300 whitespace-pre-wrap">
-                    {step.template ?? "—"}
-                  </p>
-                </div>
-              )}
-            </div>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
 export function CampaignDetailClient({
   campaign,
   leadCount,
@@ -127,7 +49,8 @@ export function CampaignDetailClient({
 }: Props) {
   const router = useRouter()
   const [isEditing, setIsEditing] = useState(false)
-  const [starting, setStarting] = useState(false)
+  /** "idle" | "starting" (HTTP) | "running" (OK, waiting for status active/sending/completed). */
+  const [startSendingUi, setStartSendingUi] = useState<"idle" | "starting" | "running">("idle")
   const [stopping, setStopping] = useState(false)
   const [resuming, setResuming] = useState(false)
 
@@ -140,31 +63,37 @@ export function CampaignDetailClient({
 
   const targetLabel = getTargetLabel(campaign)
   const status = campaign.status ?? "draft"
-  const followUps = parseFollowUps(campaign.follow_up_schedule)
+
+  useEffect(() => {
+    if (startSendingUi !== "running") return
+    if (status === "active" || status === "sending" || status === "completed") {
+      setStartSendingUi("idle")
+    }
+  }, [startSendingUi, status])
 
   async function handleStartSending() {
     if (status === "active") return
-    setStarting(true)
+    if (startSendingUi !== "idle") return
+    setStartSendingUi("starting")
     try {
       const res = await fetch(`/api/campaigns/${campaign.id}/start-sending`, { method: "POST" })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? "Failed to start sending")
+      setStartSendingUi("running")
       router.refresh()
     } catch {
-      // Could add toast/error state
-    } finally {
-      setStarting(false)
+      setStartSendingUi("idle")
     }
   }
 
   async function handleStopCampaign() {
     setStopping(true)
     try {
-      const { error } = await supabase
-        .from("campaigns")
-        .update({ status: "paused" })
-        .eq("id", campaign.id)
-      if (error) throw error
+      const res = await fetch(`/api/campaigns/${campaign.id}/stop-campaign`, {
+        method: "POST",
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? "Failed to stop")
       router.refresh()
     } catch {
       // Could add toast/error state
@@ -176,11 +105,11 @@ export function CampaignDetailClient({
   async function handleResumeCampaign() {
     setResuming(true)
     try {
-      const { error } = await supabase
-        .from("campaigns")
-        .update({ status: "active" })
-        .eq("id", campaign.id)
-      if (error) throw error
+      const res = await fetch(`/api/campaigns/${campaign.id}/start-sending`, {
+        method: "POST",
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? "Failed to resume")
       router.refresh()
     } catch {
       // Could add toast/error state
@@ -197,9 +126,7 @@ export function CampaignDetailClient({
         </h2>
         <CampaignDetailsEditor
           campaignId={campaign.id}
-          channel={campaign.channel}
           messageTemplate={campaign.message_template ?? null}
-          followUpSchedule={campaign.follow_up_schedule ?? null}
           subject={campaign.subject ?? null}
           targetAudience={targetLabel}
           audienceNiche={campaign.audiences?.niche ?? campaign.audiences?.name ?? campaign.target_search_query ?? campaign.target_audience ?? undefined}
@@ -217,7 +144,7 @@ export function CampaignDetailClient({
   return (
     <div className="space-y-8">
       {/* Stats row */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="rounded-xl border border-zinc-700/80 bg-zinc-800/40 p-5">
           <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-1">Target</p>
           <p className="text-sm font-medium text-white truncate" title={targetLabel}>
@@ -227,14 +154,6 @@ export function CampaignDetailClient({
         <div className="rounded-xl border border-zinc-700/80 bg-zinc-800/40 p-5">
           <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-1">Leads</p>
           <p className="text-sm font-medium text-white">{leadCount}</p>
-        </div>
-        <div className="rounded-xl border border-zinc-700/80 bg-zinc-800/40 p-5">
-          <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-1">Channel</p>
-          <p className="text-sm font-medium text-white capitalize">
-            {campaign.channel === "auto"
-              ? "Auto (SMS or Email)"
-              : (campaign.channel ?? "SMS").toUpperCase()}
-          </p>
         </div>
         <div className="rounded-xl border border-zinc-700/80 bg-zinc-800/40 p-5">
           <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-1">Status</p>
@@ -247,7 +166,7 @@ export function CampaignDetailClient({
         <CampaignProgressBar
           messagesConfigured={!!(campaign.message_template?.trim())}
           leadsGenerated={leadCount >= 1}
-          campaignRunning={status === "active"}
+          campaignRunning={status === "active" || status === "sending"}
         />
       </div>
 
@@ -266,17 +185,9 @@ export function CampaignDetailClient({
         </div>
       </section>
 
-      {/* Follow-up timeline */}
-      <section className="rounded-2xl border border-zinc-700/80 bg-zinc-900/40 p-6">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500 mb-5">
-          Follow-up schedule
-        </h2>
-        <FollowUpTimeline steps={followUps} initialMessage={campaign.message_template} />
-      </section>
-
       {/* Action buttons */}
       <div className="flex flex-wrap gap-3 pt-2">
-        {status === "active" && (
+        {(status === "active" || status === "sending") && (
           <button
             type="button"
             onClick={handleStopCampaign}
@@ -300,10 +211,15 @@ export function CampaignDetailClient({
           <button
             type="button"
             onClick={handleStartSending}
-            disabled={starting}
-            className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-emerald-500 transition disabled:opacity-50"
+            disabled={startSendingUi !== "idle"}
+            aria-busy={startSendingUi !== "idle"}
+            className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-emerald-500 transition disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none"
           >
-            {starting ? "Starting…" : "Start Sending Messages"}
+            {startSendingUi === "starting"
+              ? "Starting…"
+              : startSendingUi === "running"
+                ? "Running…"
+                : "Start Sending Messages"}
           </button>
         )}
         <button

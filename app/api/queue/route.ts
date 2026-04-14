@@ -1,18 +1,25 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createClient } from "@supabase/supabase-js"
 import { createClient as createServerClient } from "@/lib/supabase/server"
-import { processQueue } from "@/lib/queue-worker"
+import { processQueue } from "@/lib/process-queue-batch"
+import { validateQueryUuid } from "@/lib/api-input-validation"
+import { heavyRouteIpLimitResponse } from "@/lib/ip-rate-limit"
+import { rateLimitResponse } from "@/lib/rateLimit"
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY || ""
 
 export async function GET(req: NextRequest) {
-  const url = new URL(req.url)
-  const campaignId = url.searchParams.get("campaign_id")
+  const _ip = heavyRouteIpLimitResponse(req, "queue")
+  if (_ip) return _ip
 
-  if (!campaignId) {
-    return NextResponse.json({ error: "campaign_id required" }, { status: 400 })
-  }
+  const _rl = rateLimitResponse(req)
+  if (_rl) return _rl
+
+  const url = new URL(req.url)
+  const vCamp = validateQueryUuid(url.searchParams.get("campaign_id"), "campaign_id")
+  if (!vCamp.ok) return vCamp.response
+  const campaignId = vCamp.value
 
   const serverClient = await createServerClient()
   const { data: { user } } = await serverClient.auth.getUser()
@@ -46,6 +53,14 @@ export async function GET(req: NextRequest) {
       console.error("Queue process error:", e)
     }
   }
+
+  const { data: statusRow } = await supabase
+    .from("campaigns")
+    .select("status")
+    .eq("id", campaignId)
+    .single()
+
+  const campaignStatus = (statusRow?.status as string | undefined) ?? campaign.status
 
   const { data: messages, error: messagesError } = await supabase
     .from("campaign_messages")
@@ -84,5 +99,8 @@ export async function GET(req: NextRequest) {
 
   const sorted = [...pending, ...sent, ...failed]
 
-  return NextResponse.json(sorted)
+  return NextResponse.json({
+    messages: sorted,
+    campaignStatus,
+  })
 }

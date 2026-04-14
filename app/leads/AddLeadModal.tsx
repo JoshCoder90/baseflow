@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation"
 import { supabase } from "@/lib/supabase"
 
 const STATUS_OPTIONS = ["New", "Contacted", "Replied", "Interested", "Meeting Booked"]
-const TAG_OPTIONS = ["Hot", "Warm", "Cold"]
+const TAG_OPTIONS = ["General", "Priority", "Partner"]
 
 type LeadRow = { id: string; name: string | null; phone: string | null; email: string | null; website?: string | null; status: string | null; company: string | null }
 
@@ -15,11 +15,17 @@ type Props = {
   onSuccess?: (newLead?: LeadRow) => void
   /** When true, button is disabled and submit is blocked (lead limit reached) */
   isAtLimit?: boolean
-  /** Used for extra server-side safety check before insert */
-  targetLeads?: number
+  /** Max lead rows allowed on this campaign (matches generate-leads / API cap). */
+  maxRowsPerCampaign?: number
 }
 
-export function AddLeadModal({ campaignId, buttonClassName, onSuccess, isAtLimit, targetLeads }: Props) {
+export function AddLeadModal({
+  campaignId,
+  buttonClassName,
+  onSuccess,
+  isAtLimit,
+  maxRowsPerCampaign,
+}: Props) {
   const router = useRouter()
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -29,7 +35,7 @@ export function AddLeadModal({ campaignId, buttonClassName, onSuccess, isAtLimit
     email: "",
     company: "",
     status: "New",
-    tag: "Warm",
+    tag: "General",
   })
 
   async function handleSubmit(e: React.FormEvent) {
@@ -38,27 +44,54 @@ export function AddLeadModal({ campaignId, buttonClassName, onSuccess, isAtLimit
       setError("Lead limit reached")
       return
     }
-    if (campaignId && targetLeads != null) {
-      const { count } = await supabase.from("leads").select("*", { count: "exact", head: true }).eq("campaign_id", campaignId)
-      if ((count ?? 0) >= targetLeads) {
-        setError("Lead limit reached")
+    if (campaignId && maxRowsPerCampaign != null) {
+      const { count } = await supabase
+        .from("leads")
+        .select("*", { count: "exact", head: true })
+        .eq("campaign_id", campaignId)
+      if ((count ?? 0) >= maxRowsPerCampaign) {
+        setError("Campaign lead row limit reached")
         return
       }
     }
     setError(null)
     setSubmitting(true)
     try {
-      const row: Record<string, unknown> = {
-        name: form.name.trim() || null,
-        email: form.email.trim() || null,
-        company: form.company.trim() || null,
-        status: form.status,
-        tag: form.tag,
+      let inserted: LeadRow | null = null
+      if (campaignId) {
+        const res = await fetch(`/api/campaigns/${campaignId}/leads`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: form.name.trim() || null,
+            email: form.email.trim() || null,
+            company: form.company.trim() || null,
+            status: form.status,
+            tag: form.tag,
+          }),
+        })
+        const json = await res.json().catch(() => ({}))
+        if (!res.ok) {
+          throw new Error(typeof json.error === "string" ? json.error : "Failed to add lead")
+        }
+        inserted = json.lead as LeadRow
+      } else {
+        const row: Record<string, unknown> = {
+          name: form.name.trim() || null,
+          email: form.email.trim() || null,
+          company: form.company.trim() || null,
+          status: form.status,
+          tag: form.tag,
+        }
+        const { data, error: insertError } = await supabase
+          .from("leads")
+          .insert([row])
+          .select("id, name, phone, email, website, status, company")
+          .single()
+        if (insertError) throw insertError
+        inserted = data as LeadRow
       }
-      if (campaignId) row.campaign_id = campaignId
-      const { data: inserted, error: insertError } = await supabase.from("leads").insert([row]).select("id, name, phone, email, website, status, company").single()
-      if (insertError) throw insertError
-      if (campaignId && inserted?.email) {
+      if (campaignId && inserted && inserted.email) {
         try {
           await fetch(`/api/campaigns/${campaignId}/queue-lead`, {
             method: "POST",
@@ -69,7 +102,7 @@ export function AddLeadModal({ campaignId, buttonClassName, onSuccess, isAtLimit
           // Non-blocking: lead is saved, queue can be retried
         }
       }
-      setForm({ name: "", email: "", company: "", status: "New", tag: "Warm" })
+      setForm({ name: "", email: "", company: "", status: "New", tag: "General" })
       setOpen(false)
       if (inserted) onSuccess?.(inserted as LeadRow)
       router.refresh()

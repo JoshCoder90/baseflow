@@ -4,6 +4,7 @@ import { useState } from "react"
 import Link from "next/link"
 import { AddLeadModal } from "@/app/leads/AddLeadModal"
 import { supabase } from "@/lib/supabase"
+import { SCRAPER_MAX_ROWS_PER_CAMPAIGN } from "@/lib/campaign-leads-insert"
 
 type Lead = {
   id: string
@@ -19,17 +20,16 @@ type Props = {
   campaignId: string
   leads: Lead[]
   loading: boolean
-  targetLeads?: number
   isGenerating?: boolean
   onLeadAdded?: (lead: Lead) => void
   onLeadDeleted?: (leadId: string) => void | Promise<void>
 }
 
-export function CampaignLeadsTable({ campaignId, leads, loading, targetLeads = 200, isGenerating, onLeadAdded, onLeadDeleted }: Props) {
+export function CampaignLeadsTable({ campaignId, leads, loading, isGenerating, onLeadAdded, onLeadDeleted }: Props) {
   const handleLeadAdded = (newLead?: Lead) => {
     if (newLead) onLeadAdded?.(newLead)
   }
-  const isAtLimit = leads.length >= targetLeads
+  const isAtLimit = leads.length >= SCRAPER_MAX_ROWS_PER_CAMPAIGN
 
   const handleDeleteLead = async (leadId: string) => {
     const { error } = await supabase.from("leads").delete().eq("id", leadId)
@@ -44,7 +44,13 @@ export function CampaignLeadsTable({ campaignId, leads, loading, targetLeads = 2
     <section>
       <div className="flex items-center justify-between gap-4 mb-4">
         <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Leads</h2>
-        <AddLeadModal campaignId={campaignId} isAtLimit={isAtLimit} targetLeads={targetLeads} buttonClassName="rounded-lg border border-zinc-600 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-700 transition disabled:opacity-50 disabled:cursor-not-allowed" onSuccess={handleLeadAdded} />
+        <AddLeadModal
+          campaignId={campaignId}
+          isAtLimit={isAtLimit}
+          maxRowsPerCampaign={SCRAPER_MAX_ROWS_PER_CAMPAIGN}
+          buttonClassName="rounded-lg border border-zinc-600 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+          onSuccess={handleLeadAdded}
+        />
       </div>
       {loading ? (
         <p className="text-sm text-zinc-500">Loading leads…</p>
@@ -118,10 +124,6 @@ function ExpandableLeadRow({ lead, onDelete }: { lead: Lead; onDelete?: () => vo
             )}
           </div>
           <div className="flex gap-2">
-            <span className="text-zinc-500 shrink-0">Phone:</span>
-            <span className="text-zinc-300">{lead.phone ?? "—"}</span>
-          </div>
-          <div className="flex gap-2">
             <span className="text-zinc-500 shrink-0">Website:</span>
             {lead.website ? (
               <a
@@ -135,12 +137,6 @@ function ExpandableLeadRow({ lead, onDelete }: { lead: Lead; onDelete?: () => vo
             ) : (
               <span className="text-zinc-500">—</span>
             )}
-          </div>
-          <div className="flex gap-2 items-center">
-            <span className="text-zinc-500 shrink-0">Status:</span>
-            <span className="inline-flex rounded-full border border-zinc-600/60 bg-zinc-700/40 px-2 py-0.5 text-xs font-medium capitalize text-zinc-300">
-              {lead.status ?? "Cold"}
-            </span>
           </div>
           <Link
             href={`/dashboard/leads/${lead.id}`}

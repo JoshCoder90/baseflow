@@ -1,90 +1,66 @@
-"use client";
+"use client"
 
-import { useState, useEffect } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
-import { supabase } from "@/lib/supabase";
-import Link from "next/link";
+import { useState } from "react"
+import { createBrowserClient } from "@supabase/auth-helpers-nextjs"
+import { useRouter } from "next/navigation"
 
 export default function LoginPage() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [successMessage, setSuccessMessage] = useState("");
-  const [error, setError] = useState("");
-  const router = useRouter();
-  const searchParams = useSearchParams();
+  const [email, setEmail] = useState("")
+  const [password, setPassword] = useState("")
 
-  useEffect(() => {
-    if (searchParams.get("registered") === "1") {
-      setSuccessMessage("Account created. You can now log in.");
-    }
-  }, [searchParams]);
+  const supabase = createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
+  const router = useRouter()
 
   const handleLogin = async () => {
-    setLoading(true);
-    setError("");
-
-    const { data, error } = await supabase.auth.signInWithPassword({
+    const { error } = await supabase.auth.signInWithPassword({
       email,
       password,
-    });
-
-    setLoading(false);
+    })
 
     if (error) {
-      setError(error.message);
-      return;
+      alert(error.message)
+      return
     }
 
-    console.log("login success", data);
-    router.push("/dashboard");
-  };
+    router.push("/dashboard")
+  }
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-gradient-to-b from-zinc-950 via-zinc-900 to-zinc-950 text-white">
-      <div className="bg-zinc-900 border border-zinc-700/50 p-8 rounded-xl w-full max-w-md space-y-4">
-        <h1 className="text-xl font-semibold">Login</h1>
-
-        {successMessage && (
-          <p className="text-emerald-400 text-sm">{successMessage}</p>
-        )}
-
-        {error && <p className="text-red-400 text-sm">{error}</p>}
+    <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto bg-[#0b0b0f] py-8 text-white">
+      <div className="w-full max-w-md p-6 rounded-xl border border-white/10 bg-white/5">
+        <h1 className="text-2xl font-semibold mb-6">Login</h1>
 
         <input
           type="email"
-          className="w-full p-2.5 rounded-lg border border-zinc-700 bg-zinc-800 text-white placeholder-zinc-500 focus:border-zinc-600 focus:outline-none focus:ring-1 focus:ring-zinc-600"
           placeholder="Email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          disabled={loading}
+          className="w-full mb-3 p-3 rounded-lg bg-black/30 border border-white/10 outline-none"
         />
 
         <input
           type="password"
-          className="w-full p-2.5 rounded-lg border border-zinc-700 bg-zinc-800 text-white placeholder-zinc-500 focus:border-zinc-600 focus:outline-none focus:ring-1 focus:ring-zinc-600"
           placeholder="Password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          disabled={loading}
+          className="w-full mb-4 p-3 rounded-lg bg-black/30 border border-white/10 outline-none"
         />
 
         <button
           type="button"
           onClick={handleLogin}
-          disabled={loading}
-          className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-70 disabled:cursor-not-allowed p-2.5 rounded-lg font-medium transition"
+          className="w-full bg-blue-600 hover:bg-blue-700 transition rounded-lg p-3 font-medium"
         >
-          {loading ? "Logging in..." : "Login"}
+          Login
         </button>
 
-        <p className="text-sm text-zinc-500 text-center">
-          Don&apos;t have an account?{" "}
-          <Link href="/signup" className="text-blue-400 hover:text-blue-300">
-            Sign up
-          </Link>
+        <p className="text-sm text-gray-400 mt-4 text-center">
+          Don&apos;t have an account? Sign up
         </p>
       </div>
     </div>
-  );
+  )
 }

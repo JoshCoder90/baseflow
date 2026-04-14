@@ -36,7 +36,7 @@ export default function NewCampaignPage() {
         </div>
 
         <p className="mt-6 text-center text-xs text-zinc-600">
-          Up to 200 leads per campaign. Leads include business name, email, phone, and website when available.
+          We find businesses until you have up to 200 valid emails (safety cap: 800 businesses scanned). Rows include name, email, and website when available.
         </p>
       </div>
     </div>

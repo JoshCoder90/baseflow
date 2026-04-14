@@ -1,253 +1,270 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import type { CampaignQueueStats } from "@/lib/get-campaign-stats"
 
-type QueueItem = {
+export type CampaignQueueMessageRow = {
   id: string
-  lead_name: string
-  email: string
-  status: "pending" | "sent" | "failed"
-  scheduled_for: string
-  sent_at: string | null
+  lead_id: string
   step_number?: number
-}
-
-const STEP_LABELS: Record<number, string> = {
-  1: "Initial",
-  2: "Bump",
-  3: "Nudge",
-  4: "Final",
+  status: string | null
+  next_send_at: string | null
+  sent_at: string | null
+  leads?: { name: string | null; email: string | null } | null
 }
 
 type Props = {
-  campaignId: string
-  activeTab: string
-  campaignStatus?: string
+  queueMessages?: CampaignQueueMessageRow[]
+  /** DB counts from `getCampaignStats` — same as Campaign Activity. */
+  queueStats: CampaignQueueStats
+  loading?: boolean
+  campaignStatus?: string | null
 }
 
-function formatTimeUntil(scheduledAt: string | null, now: number): string {
-  if (!scheduledAt) return "—"
-  const diffMs = new Date(scheduledAt).getTime() - now
-  if (diffMs <= 0) return "Sending now"
-
-  const totalMinutes = Math.floor(diffMs / (1000 * 60))
-  const totalHours = Math.floor(diffMs / (1000 * 60 * 60))
-  const days = Math.floor(totalHours / 24)
-
-  if (days >= 1) return `${days}d`
-
-  const hours = totalHours
-  const minutes = totalMinutes % 60
-
-  if (hours === 0) return `${minutes}m`
-  return `${hours}h ${minutes}m`
+/** Naive ISO strings (no Z/offset) are interpreted as UTC so countdown matches server schedule. */
+function nextSendAtToMs(nextSendAt: string): number {
+  const t = nextSendAt.trim()
+  const hasTz = /Z$/i.test(t) || /[+-]\d{2}:?\d{2}$/.test(t)
+  const target = new Date(hasTz ? t : `${t}Z`).getTime()
+  return target
 }
 
-export function CampaignQueueTab({ campaignId, activeTab, campaignStatus }: Props) {
-  const [queue, setQueue] = useState<QueueItem[]>([])
-  const [loading, setLoading] = useState(true)
-  const [mounted, setMounted] = useState(false)
-  const [now, setNow] = useState(Date.now())
-  const [activeStep, setActiveStep] = useState(1)
-  const pollingRef = useRef(false)
+/** Countdown for a future `next_send_at`. If already due, callers should show Sending / trigger send instead. */
+function formatQueuedCountdown(nextSendAt: string | null, campaignIsActive: boolean): string {
+  if (!campaignIsActive) return "Paused"
+  if (!nextSendAt) return "Pending schedule"
+
+  const now = Date.now()
+  const target = nextSendAtToMs(nextSendAt)
+  const diffMs = target - now
+
+  if (diffMs <= 0) return campaignIsActive ? "Sending now" : "Paused"
+
+  const totalSec = Math.max(1, Math.ceil(diffMs / 1000))
+  if (totalSec < 60) {
+    return `Sending in ${totalSec}s`
+  }
+  const minutes = Math.floor(totalSec / 60)
+  const seconds = totalSec % 60
+  return `Sending in ${minutes}m ${seconds}s`
+}
+
+function isDue(row: CampaignQueueMessageRow): boolean {
+  if (!row.next_send_at || row.sent_at) return false
+  return nextSendAtToMs(row.next_send_at) <= Date.now()
+}
+
+export function CampaignQueueTab({
+  queueMessages = [],
+  queueStats,
+  loading,
+  campaignStatus,
+}: Props) {
+  const [tick, setTick] = useState(Date.now())
+  const [inflightIds, setInflightIds] = useState<Set<string>>(() => new Set())
+  const triggeredRef = useRef<Set<string>>(new Set())
+
+  const tickMs = useMemo(() => {
+    const now = Date.now()
+    for (const row of queueMessages) {
+      if (row.status !== "queued" || !row.next_send_at || row.sent_at) continue
+      const msLeft = nextSendAtToMs(row.next_send_at) - now
+      if (msLeft <= 2000) return 250
+    }
+    return 1000
+  }, [queueMessages, tick])
 
   useEffect(() => {
     const interval = setInterval(() => {
-      setNow(Date.now())
-    }, 1000)
+      setTick(Date.now())
+    }, tickMs)
     return () => clearInterval(interval)
-  }, [])
+  }, [tickMs])
 
-  const startPolling = async () => {
-    if (pollingRef.current) return
-    pollingRef.current = true
-
-    const loop = async () => {
-      if (!pollingRef.current) return
-
+  const triggerSend = useCallback(async (messageId: string) => {
+    if (triggeredRef.current.has(messageId)) return
+    triggeredRef.current.add(messageId)
+    setInflightIds((prev) => new Set(prev).add(messageId))
+    try {
+      const res = await fetch("/api/send-email-now", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messageId }),
+      })
+      let data: {
+        ok?: boolean
+        skipped?: boolean
+        reason?: string
+        error?: string
+      } = {}
       try {
-        const res = await fetch(`/api/queue?campaign_id=${campaignId}`)
-        const data = await res.json()
-
-        setQueue((prev) => {
-          if (JSON.stringify(prev) === JSON.stringify(data)) return prev
-          return Array.isArray(data) ? data : []
-        })
-      } catch (err) {
-        console.error("Queue fetch failed", err)
-      } finally {
-        setLoading(false)
+        data = (await res.json()) as typeof data
+      } catch {
+        /* ignore */
       }
 
-      setTimeout(loop, 3000)
+      if (res.status === 409 && data?.reason === "campaign_not_active") {
+        triggeredRef.current.delete(messageId)
+      } else if (!res.ok && res.status >= 500) {
+        triggeredRef.current.delete(messageId)
+      } else if (data?.skipped && data?.reason === "claim_failed") {
+        /* worker won the row — stop retrying */
+      }
+    } catch {
+      triggeredRef.current.delete(messageId)
+    } finally {
+      setInflightIds((prev) => {
+        const next = new Set(prev)
+        next.delete(messageId)
+        return next
+      })
     }
-
-    loop()
-  }
-
-  useEffect(() => {
-    setMounted(true)
   }, [])
 
-  useEffect(() => {
-    if (!campaignId || activeTab !== "queue") return
-
-    const fetchQueue = async () => {
-      try {
-        setLoading(true)
-        const res = await fetch(`/api/queue?campaign_id=${campaignId}`)
-        const data = await res.json()
-
-        if (Array.isArray(data)) {
-          setQueue(data)
-        } else {
-          setQueue([])
-        }
-      } catch (err) {
-        console.error("QUEUE ERROR:", err)
-        setQueue([])
-      } finally {
-        setLoading(false)
-      }
-    }
-
-    fetchQueue()
-  }, [campaignId, activeTab])
+  const campaignIsActive =
+    campaignStatus === "active" || campaignStatus === "sending"
 
   useEffect(() => {
-    if (!campaignId || (campaignStatus !== "active" && campaignStatus !== "sending")) return
-
-    startPolling()
-
-    return () => {
-      pollingRef.current = false
+    if (!campaignIsActive) return
+    for (const row of queueMessages) {
+      if (row.status !== "queued" || !row.next_send_at || row.sent_at) continue
+      if (nextSendAtToMs(row.next_send_at) > Date.now()) continue
+      if (triggeredRef.current.has(row.id)) continue
+      void triggerSend(row.id)
     }
-  }, [campaignId, campaignStatus])
+  }, [tick, queueMessages, campaignIsActive, triggerSend])
 
-  const filteredQueue = (queue || []).filter((i) => (i.step_number ?? 1) === activeStep)
-  const nextPendingIso = (queue || []).find((i) => i.status === "pending")?.scheduled_for ?? null
-  const nextSendCountdown = formatTimeUntil(nextPendingIso, now)
-  const queued = (queue || []).filter((i) => i.status === "pending")
-  const showTimes = mounted
-  const sent = (queue || []).filter((i) => i.status === "sent")
-  const failed = (queue || []).filter((i) => i.status === "failed")
+  const sorted = [...queueMessages].sort((a, b) => {
+    if (a.sent_at && !b.sent_at) return 1
+    if (!a.sent_at && b.sent_at) return -1
+    if (a.status === "sent") return 1
+    if (b.status === "sent") return -1
+
+    if (a.status === "sending" && b.status !== "sending") return -1
+    if (b.status === "sending" && a.status !== "sending") return 1
+
+    if (!a.next_send_at && !b.next_send_at) return 0
+    if (!a.next_send_at) return 1
+    if (!b.next_send_at) return -1
+
+    return nextSendAtToMs(a.next_send_at) - nextSendAtToMs(b.next_send_at)
+  })
+
+  const nextQueued = sorted.find(
+    (m) =>
+      (m.status === "queued" || m.status === "pending") &&
+      m.next_send_at &&
+      !m.sent_at
+  )
+
+  const nextSendSummary = (() => {
+    if (!nextQueued?.next_send_at) {
+      return campaignIsActive
+        ? null
+        : queueMessages.some((m) => m.status === "queued" || m.status === "pending")
+          ? "Paused"
+          : null
+    }
+    if (isDue(nextQueued)) {
+      if (!campaignIsActive) return "Paused"
+      if (nextQueued.status === "queued") return "Sending now"
+      return "Waiting to queue"
+    }
+    return formatQueuedCountdown(nextQueued.next_send_at, campaignIsActive)
+  })()
 
   if (loading) {
     return (
-      <div className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 backdrop-blur-sm p-6">
-        <p className="text-zinc-500">Loading queue...</p>
-      </div>
-    )
-  }
-
-  if (!queue || queue.length === 0) {
-    return (
-      <div className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 backdrop-blur-sm p-8 text-center">
-        <p className="text-zinc-400">
-          {campaignStatus === "completed"
-            ? "No messages found for this campaign"
-            : "Your messages will appear here once campaign starts"}
-        </p>
-      </div>
+      <div className="p-6 text-zinc-500">Loading...</div>
     )
   }
 
   return (
-    <div className="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 backdrop-blur-sm overflow-hidden">
-      <div className="p-6 border-b border-zinc-800/80">
-        <div className="flex flex-wrap gap-6 items-center">
-          <div>
-            <p className="text-xs font-medium uppercase tracking-wider text-zinc-500">Queued</p>
-            <p className="text-xl font-semibold text-yellow-400 tabular-nums">{queued.length}</p>
-          </div>
-          <div>
-            <p className="text-xs font-medium uppercase tracking-wider text-zinc-500">Sent</p>
-            <p className="text-xl font-semibold text-green-400 tabular-nums">{sent.length}</p>
-          </div>
-          <div>
-            <p className="text-xs font-medium uppercase tracking-wider text-zinc-500">Failed</p>
-            <p className="text-xl font-semibold text-red-400 tabular-nums">{failed.length}</p>
-          </div>
-          {showTimes && nextPendingIso && (
-            <div className="ml-auto">
-              <p className="text-xs font-medium uppercase tracking-wider text-zinc-500">Next send in</p>
-              <p className="text-lg font-semibold text-white">{nextSendCountdown}</p>
-            </div>
-          )}
+    <div className="space-y-6" data-refresh={tick}>
+      <div className="flex flex-wrap gap-6 items-baseline">
+        <div className="text-zinc-400">
+          Sent: <span className="font-semibold text-green-400">{queueStats.sent}</span>
         </div>
+        <div className="text-zinc-400">
+          Not Sent: <span className="font-semibold text-yellow-400">{queueStats.notSent}</span>
+        </div>
+        <div className="text-zinc-400">
+          Failed: <span className="font-semibold text-red-400">{queueStats.failed}</span>
+        </div>
+        {nextSendSummary !== null && (
+          <div className="text-sm text-gray-400">
+            Next send — {nextSendSummary}
+          </div>
+        )}
       </div>
 
-      <div className="flex gap-2 p-4 border-b border-zinc-800/80">
-        {[1, 2, 3, 4].map((step) => {
-          const count = (queue || []).filter((i) => (i.step_number ?? 1) === step).length
+      <div className="space-y-4">
+        {sorted.map((row) => {
+          const name = row.leads?.name ?? null
+          const email = row.leads?.email ?? null
+
+          const due = isDue(row)
+          const inflight = inflightIds.has(row.id)
+          const showSendingNow =
+            row.status === "sending" ||
+            inflight ||
+            (campaignIsActive && row.status === "queued" && due)
+
+          let label: string
+          if (row.status === "sent" || row.sent_at) {
+            label = "Sent"
+          } else if (showSendingNow) {
+            label = "Sending now"
+          } else if (row.status === "failed") {
+            label = "Failed"
+          } else if (row.status === "pending" && !row.next_send_at) {
+            label = "Pending schedule"
+          } else if (row.status === "pending" && row.next_send_at) {
+            if (!campaignIsActive) label = "Paused"
+            else if (due) label = "Waiting to queue"
+            else label = formatQueuedCountdown(row.next_send_at, campaignIsActive)
+          } else if (row.status === "queued" || row.status === "pending") {
+            label = formatQueuedCountdown(row.next_send_at ?? null, campaignIsActive)
+          } else {
+            label = "—"
+          }
+
+          const statusLabel =
+            row.status === "sent" || row.sent_at ? (
+              <span className="text-green-400">{label}</span>
+            ) : showSendingNow ? (
+              <span className="text-blue-400">{label}</span>
+            ) : row.status === "failed" ? (
+              <span className="text-red-400">{label}</span>
+            ) : (
+              <span
+                className={
+                  label === "Pending schedule" ||
+                  label === "Paused" ||
+                  label === "Waiting to queue"
+                    ? "text-gray-400"
+                    : "text-yellow-400"
+                }
+              >
+                {label}
+              </span>
+            )
+
           return (
-            <button
-              key={step}
-              type="button"
-              onClick={() => setActiveStep(step)}
-              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition ${
-                activeStep === step
-                  ? "bg-white text-zinc-900"
-                  : "bg-zinc-700/60 text-zinc-400 hover:text-zinc-200"
-              }`}
+            <div
+              key={row.id}
+              className="flex justify-between items-center p-4 border border-white/10 rounded-xl bg-white/5"
             >
-              {STEP_LABELS[step] ?? `Step ${step}`}
-              {count > 0 && (
-                <span className={`ml-1.5 ${activeStep === step ? "text-zinc-600" : "text-zinc-500"}`}>
-                  ({count})
-                </span>
-              )}
-            </button>
+              <div>
+                <div className="text-white">{name || "—"}</div>
+                <div className="text-sm text-gray-400">{email || "—"}</div>
+              </div>
+
+              <div>{statusLabel}</div>
+            </div>
           )
         })}
       </div>
-
-      {!filteredQueue.length ? (
-        <div className="p-8 text-center">
-          <p className="text-zinc-500">No messages for this step</p>
-        </div>
-      ) : (
-      <div className="divide-y divide-zinc-800/80">
-        {filteredQueue.map((item) => (
-          <div
-            key={item.id}
-            className="flex flex-wrap items-center gap-4 p-4 hover:bg-zinc-800/30 transition-colors"
-          >
-            <div className="min-w-0 flex-1">
-              <p className="font-medium text-white truncate">{item.lead_name || item.email || "—"}</p>
-              <p className="text-sm text-zinc-500 truncate">{item.email}</p>
-            </div>
-            <div className="flex items-center gap-3">
-              <span
-                className={`px-2.5 py-1 rounded-full text-xs font-medium ${
-                  item.status === "pending"
-                    ? "bg-yellow-500/10 text-yellow-400"
-                    : item.status === "sent"
-                      ? "bg-green-500/10 text-green-400"
-                      : "bg-red-500/10 text-red-400"
-                }`}
-              >
-                {item.status === "pending" && "Pending"}
-                {item.status === "sent" && "Sent"}
-                {item.status === "failed" && "Failed"}
-              </span>
-              <span className="text-sm text-zinc-400">
-                {item.status === "pending" &&
-                  (showTimes
-                    ? `Sending in: ${formatTimeUntil(item.scheduled_for, now)}`
-                    : "Scheduled")}
-                {item.status === "sent" &&
-                  item.sent_at &&
-                  (showTimes
-                    ? `Sent at ${new Date(item.sent_at).toLocaleTimeString()}`
-                    : "Sent")}
-                {item.status === "failed" && "Retry queued"}
-              </span>
-            </div>
-          </div>
-        ))}
-      </div>
-      )}
     </div>
   )
 }

@@ -3,7 +3,6 @@
 import Link from "next/link"
 import { CampaignStatusBadge } from "./CampaignStatusBadge"
 
-type FollowUpStep = { day: number; type: string }
 type Campaign = {
   id: string
   name?: string | null
@@ -11,9 +10,11 @@ type Campaign = {
   target_search_query?: string | null
   audience_id?: string | null
   audiences?: { id: string; name: string | null; niche: string | null; location: string | null } | null
-  follow_up_schedule?: string | FollowUpStep[] | null
+  message_template?: string | null
   status?: string | null
   created_at?: string | null
+  sent_count?: number | null
+  queue_not_sent?: number | null
 }
 
 type Props = {
@@ -28,33 +29,10 @@ function getTargetLabel(campaign: Campaign): string {
   return campaign.target_audience ?? "No target defined"
 }
 
-function parseFollowUpPreview(
-  raw: string | FollowUpStep[] | null | undefined
-): string {
-  if (raw == null) return ""
-  let steps: FollowUpStep[] = []
-  if (Array.isArray(raw)) steps = raw
-  else if (typeof raw === "string") {
-    try {
-      const parsed = JSON.parse(raw)
-      steps = Array.isArray(parsed) ? parsed : []
-    } catch {
-      return ""
-    }
-  }
-  const labels: Record<string, string> = {
-    bump: "Bump",
-    nudge: "Nudge",
-    followup: "Follow-up",
-    final: "Final Check-in",
-  }
-  return steps
-    .filter((s) => s.day >= 3)
-    .map((s) => `Day ${s.day} ${labels[s.type] ?? s.type}`)
-    .join(" • ")
-}
-
 export function CampaignCard({ campaign, onDelete }: Props) {
+  const sentCount = campaign.sent_count ?? 0
+  const queueNotSent = campaign.queue_not_sent ?? 0
+
   const created = campaign.created_at
     ? new Date(campaign.created_at).toLocaleDateString("en-US", {
         month: "short",
@@ -62,8 +40,6 @@ export function CampaignCard({ campaign, onDelete }: Props) {
         year: "numeric",
       })
     : "—"
-  const followUpPreview = parseFollowUpPreview(campaign.follow_up_schedule)
-
   return (
     <Link
       href={`/dashboard/campaigns/${campaign.id}`}
@@ -101,14 +77,11 @@ export function CampaignCard({ campaign, onDelete }: Props) {
       </div>
 
       <div className="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-xs text-zinc-500">
-        <span>0 Messages Sent</span>
-        <span>0 Replies</span>
-        <span>0 Interested Leads</span>
+        <span>{sentCount} sent</span>
+        <span>{queueNotSent} in queue</span>
+        <span>0 replies</span>
+        <span>0 interested</span>
       </div>
-
-      {followUpPreview && (
-        <p className="mt-3 text-xs text-zinc-500 truncate">{followUpPreview}</p>
-      )}
 
       <div className="mt-4">
         <span className="inline-flex items-center rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white group-hover:bg-blue-500 transition">

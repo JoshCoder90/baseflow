@@ -1,0 +1,26 @@
+-- Optional: call your deployed app from the database on a schedule (pg_cron + pg_net).
+-- Enable extensions in Supabase Dashboard → Database → Extensions: pg_cron, pg_net.
+--
+-- Standard pg_cron uses five-field schedules; the usual minimum is once per minute (not every 10s).
+-- For ~10s cadence while developing, run in a second terminal: npm run queue-worker
+--
+-- After deployment, run in the SQL Editor (replace URL and secret; set CRON_SECRET in the app env too):
+--
+-- select
+--   cron.schedule(
+--     'process-send-queue',
+--     '* * * * *',
+--     $$
+--     select
+--       net.http_post(
+--         url := 'https://YOUR_PROJECT.vercel.app/api/process-send-queue',
+--         headers := jsonb_build_object(
+--           'Content-Type', 'application/json',
+--           'Authorization', 'Bearer YOUR_CRON_SECRET'
+--         ),
+--         body := '{}'::jsonb
+--       );
+--     $$
+--   );
+
+select 1;

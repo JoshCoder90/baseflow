@@ -10,7 +10,7 @@ function formatTimeUntil(sendAt: string | null): string {
     const target = new Date(sendAt)
     const diffMs = target.getTime() - now.getTime()
 
-    if (diffMs <= 0) return "Sending now"
+    if (diffMs <= 0) return "Due"
 
     const totalMinutes = Math.floor(diffMs / (1000 * 60))
     const totalHours = Math.floor(diffMs / (1000 * 60 * 60))
@@ -44,10 +44,6 @@ type Props = {
 function PhaseBadge({ phase }: { phase: string }) {
   const styles: Record<string, string> = {
     "Initial Messages": "bg-blue-500/15 text-blue-400 border-blue-500/30",
-    Bump: "bg-amber-500/15 text-amber-400 border-amber-500/30",
-    Nudge: "bg-amber-500/15 text-amber-400 border-amber-500/30",
-    "Follow-up": "bg-purple-500/15 text-purple-400 border-purple-500/30",
-    "Final Check-in": "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
     Completed: "bg-zinc-600/60 text-zinc-300 border-zinc-500/50",
     "Sending...": "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
     Paused: "bg-amber-500/15 text-amber-400 border-amber-500/30",

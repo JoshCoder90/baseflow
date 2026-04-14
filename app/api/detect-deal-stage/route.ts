@@ -1,7 +1,10 @@
 import dotenv from "dotenv"
+import { rateLimitResponse } from "@/lib/rateLimit"
 dotenv.config({ path: ".env.local" })
 
 import { NextResponse } from "next/server"
+import { validateUuid } from "@/lib/api-input-validation"
+import { heavyRouteIpLimitResponse } from "@/lib/ip-rate-limit"
 import OpenAI from "openai"
 import { createClient } from "@supabase/supabase-js"
 
@@ -19,18 +22,24 @@ const supabase = createClient(
 const VALID_STAGES = ["Lead", "Contacted", "Interested", "Call Booked", "Closed"] as const
 
 export async function POST(req: Request) {
+  const _ip = heavyRouteIpLimitResponse(req, "detect-deal-stage")
+  if (_ip) return _ip
+
+  const _rl = rateLimitResponse(req)
+  if (_rl) return _rl
+
   try {
     if (!process.env.OPENAI_API_KEY) {
       return NextResponse.json({ error: "OPENAI_API_KEY missing" }, { status: 500 })
     }
-    const { leadId } = await req.json()
-    if (!leadId) {
-      return NextResponse.json({ error: "leadId required" }, { status: 400 })
-    }
+    const { leadId: leadIdRaw } = await req.json()
+    const v = validateUuid(leadIdRaw, "leadId")
+    if (!v.ok) return v.response
+    const leadId = v.value
 
     const { data: messages, error: messagesError } = await supabase
       .from("messages")
-      .select("role, content, created_at")
+      .select("*")
       .eq("lead_id", leadId)
       .order("created_at", { ascending: true })
 

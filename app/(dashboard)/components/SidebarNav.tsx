@@ -2,6 +2,7 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
+import { useEffect, useState } from "react"
 import { Plug } from "lucide-react"
 import { supabase } from "@/lib/supabase"
 
@@ -9,8 +10,115 @@ const navBase = "flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-mediu
 const navInactive = "text-zinc-400 hover:text-white hover:bg-zinc-800/60"
 const navActive = "bg-zinc-800/80 text-white border border-zinc-700/50"
 
+/** Unread = latest inbound time is newer than last_read_at (outbound does not affect this). */
+function unreadInboundCount(
+  rows: { last_inbound_at?: unknown; last_read_at?: unknown }[] | null
+): number {
+  return (rows ?? []).filter((c) => {
+    const at = c.last_inbound_at
+    if (at == null || String(at).length === 0) return false
+    return (
+      new Date(String(at)).getTime() >
+      new Date((c.last_read_at as string | null) || 0).getTime()
+    )
+  }).length
+}
+
 export function SidebarNav() {
-  const pathname = usePathname()
+  const pathname = usePathname() ?? ""
+  const [unreadCount, setUnreadCount] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    let debounce: ReturnType<typeof setTimeout> | undefined
+    let channel: ReturnType<typeof supabase.channel> | null = null
+
+    const fetchUnread = async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+      if (!user) {
+        setUnreadCount(0)
+        return
+      }
+
+      const { data, error } = await supabase
+        .from("conversations")
+        .select("*")
+        .eq("user_id", user.id)
+
+      if (cancelled) return
+      if (error) {
+        console.warn("[SidebarNav] conversations:", error.message)
+        return
+      }
+
+      setUnreadCount(unreadInboundCount(data ?? []))
+    }
+
+    async function setup() {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+      if (cancelled || !user) return
+
+      await fetchUnread()
+
+      const schedule = () => {
+        clearTimeout(debounce)
+        debounce = setTimeout(() => {
+          void fetchUnread()
+        }, 400)
+      }
+
+      channel = supabase
+        .channel(`sidebar-inbox-unread-${user.id}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "conversations",
+            filter: `user_id=eq.${user.id}`,
+          },
+          schedule
+        )
+        .on(
+          "postgres_changes",
+          { event: "INSERT", schema: "public", table: "messages" },
+          schedule
+        )
+        .subscribe()
+    }
+
+    void setup()
+
+    return () => {
+      cancelled = true
+      clearTimeout(debounce)
+      if (channel) void supabase.removeChannel(channel)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!pathname.startsWith("/dashboard/inbox")) return
+
+    void (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+      if (!user) {
+        setUnreadCount(0)
+        return
+      }
+      const { data, error } = await supabase
+        .from("conversations")
+        .select("*")
+        .eq("user_id", user.id)
+      if (error) return
+      setUnreadCount(unreadInboundCount(data ?? []))
+    })()
+  }, [pathname])
 
   const isDashboard = pathname === "/dashboard"
   const isCampaigns = pathname.startsWith("/dashboard/campaigns")
@@ -43,10 +151,19 @@ export function SidebarNav() {
       </Link>
       <Link
         href="/dashboard/inbox"
-        className={`${navBase} ${isInbox ? navActive : navInactive}`}
+        className={`${navBase} w-full ${isInbox ? navActive : navInactive}`}
       >
-        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
-        Inbox
+        <div className="flex w-full items-center justify-between">
+          <span className="flex items-center gap-3">
+            <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
+            Inbox
+          </span>
+          {unreadCount > 0 && (
+            <div className="ml-2 shrink-0 rounded-full bg-blue-500 px-2 py-0.5 text-xs text-white">
+              {unreadCount}
+            </div>
+          )}
+        </div>
       </Link>
       <Link
         href="/dashboard/connections"

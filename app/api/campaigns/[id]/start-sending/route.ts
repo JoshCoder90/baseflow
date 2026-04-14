@@ -1,71 +1,72 @@
-import { NextRequest, NextResponse } from "next/server"
+import { NextResponse } from "next/server"
 import { createClient } from "@supabase/supabase-js"
-import { Resend } from "resend"
-import { personalizeMessage } from "@/lib/lead-personalization"
+import { createClient as createServerClient } from "@/lib/supabase/server"
+import { applyCampaignSendSchedule } from "@/lib/campaign-schedule"
+import { OUTBOUND_EMAIL_CHANNEL } from "@/lib/outbound-channel"
+import { rateLimitResponse } from "@/lib/rateLimit"
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL || "",
-  process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ""
-)
-const resend = new Resend(process.env.RESEND_API_KEY)
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY || ""
 
 export async function POST(
-  req: NextRequest,
+  _req: Request,
   context: { params: Promise<{ id: string }> }
 ) {
-  try {
-    const { id } = await context.params
-    console.log("=== FETCHING LEADS ===")
-    console.log("Campaign ID:", id)
+  const _rl = rateLimitResponse(_req)
+  if (_rl) return _rl
 
-    const { data: campaign } = await supabase
+  try {
+    const campaignId = (await context.params).id
+
+    const serverClient = await createServerClient()
+    const {
+      data: { user },
+    } = await serverClient.auth.getUser()
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    }
+
+    const supabase = createClient(supabaseUrl, supabaseServiceKey)
+
+    const { data: campaign, error: campaignFetchError } = await supabase
       .from("campaigns")
-      .select("message_template, subject")
-      .eq("id", id)
+      .select("id, user_id")
+      .eq("id", campaignId)
+      .eq("user_id", user.id)
       .single()
 
-    const messageTemplate = campaign?.message_template?.trim() || "Hey {{first_name}}, I wanted to reach out. Would love to connect!"
-    const subject = campaign?.subject?.trim() || "Quick question"
-
-    const { data: leads, error } = await supabase
-      .from("leads")
-      .select("*")
-      .eq("campaign_id", id)
-
-    if (!leads) {
-      return NextResponse.json({ error: "Leads null" }, { status: 500 })
+    if (campaignFetchError || !campaign) {
+      return NextResponse.json({ error: "Campaign not found" }, { status: 404 })
     }
 
-    if (leads.length === 0) {
-      return NextResponse.json({ message: "No leads found" })
+    const { messagesInserted, messagesScheduled } = await applyCampaignSendSchedule(
+      supabase,
+      campaignId
+    )
+
+    const { error: activeErr } = await supabase
+      .from("campaigns")
+      .update({ status: "active", channel: OUTBOUND_EMAIL_CHANNEL })
+      .eq("id", campaignId)
+      .eq("user_id", user.id)
+
+    if (activeErr) {
+      console.error("[start-sending] failed to set campaign active:", activeErr)
+      return NextResponse.json(
+        { error: activeErr.message ?? "Failed to update campaign" },
+        { status: 500 }
+      )
     }
+    console.log(
+      "[start-sending] campaign_messages inserted:",
+      messagesInserted,
+      "scheduled:",
+      messagesScheduled
+    )
 
-    let sentCount = 0
-    for (const lead of leads) {
-      if (!lead.email) continue
-      if (lead.status === "messaged") continue
-
-      const personalizedMessage = personalizeMessage(messageTemplate, lead)
-      const htmlBody = personalizedMessage.includes("<") ? personalizedMessage : `<p>${personalizedMessage.replace(/\n/g, "<br />")}</p>`
-
-      console.log("Sending to:", lead.email)
-      const { error: sendError } = await resend.emails.send({
-        from: "BaseFlow <noreply@gobaseflow.com>",
-        to: lead.email,
-        subject,
-        html: htmlBody,
-      })
-
-      if (!sendError) {
-        sentCount++
-        await supabase.from("leads").update({ status: "messaged", messages_sent: 1, last_message_sent_at: new Date().toISOString() }).eq("id", lead.id)
-      }
-    }
-
-    return NextResponse.json({ success: true, leadsCount: leads.length, sentCount })
+    return NextResponse.json({ success: true })
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    console.error("FULL ERROR:", err)
-    return NextResponse.json({ error: message }, { status: 500 })
+    console.error("[start-sending] ERROR:", err)
+    return NextResponse.json({ error: "failed" }, { status: 500 })
   }
 }

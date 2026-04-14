@@ -1,12 +1,11 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect } from "react"
 import Link from "next/link"
 
 type ProspectLead = {
   id: string
   name: string | null
-  phone: string | null
   email: string | null
   website?: string | null
   status: string | null
@@ -19,10 +18,6 @@ type ProspectLead = {
 
 type SendingStats = {
   messagesSent: number
-  initial: number
-  nudge: number
-  followUp: number
-  final: number
   failedSends: number
   replyRate: number
 }
@@ -68,26 +63,26 @@ type Props = {
 
 const DEFAULT_DATA: TabsData = {
   leads: [],
-  sendingStats: { messagesSent: 0, initial: 0, nudge: 0, followUp: 0, final: 0, failedSends: 0, replyRate: 0 },
+  sendingStats: { messagesSent: 0, failedSends: 0, replyRate: 0 },
   replies: [],
   analytics: { messagesSent: 0, replies: 0, interestedLeads: 0, meetingsBooked: 0, replyRate: 0 },
 }
+
+const TABS_POLL_MS = 3000
 
 export function CampaignTabs({ campaignId, pollForLeads = false }: Props) {
   const [activeTab, setActiveTab] = useState<"prospects" | "scheduled" | "sending" | "replies" | "analytics">("sending")
   const [data, setData] = useState<TabsData | null>(null)
   const [loading, setLoading] = useState(true)
 
-  const lastFetchedCampaignId = useRef<string | null>(null)
-
   useEffect(() => {
-    if (lastFetchedCampaignId.current === campaignId) return
-    lastFetchedCampaignId.current = campaignId
-    console.log("FETCH TRIGGERED")
-    const fetchTabsData = async () => {
-      setLoading(true)
+    let cancelled = false
+
+    const fetchTabsData = async (showLoading: boolean) => {
+      if (showLoading) setLoading(true)
       try {
         const res = await fetch(`/api/campaigns/${campaignId}/tabs`)
+        if (cancelled) return
         if (res.ok) {
           const json = await res.json()
           setData(json)
@@ -95,12 +90,21 @@ export function CampaignTabs({ campaignId, pollForLeads = false }: Props) {
           setData(DEFAULT_DATA)
         }
       } catch {
-        setData(DEFAULT_DATA)
+        if (!cancelled) setData(DEFAULT_DATA)
       } finally {
-        setLoading(false)
+        if (!cancelled && showLoading) setLoading(false)
       }
     }
-    fetchTabsData()
+
+    void fetchTabsData(true)
+    const interval = setInterval(() => {
+      void fetchTabsData(false)
+    }, TABS_POLL_MS)
+
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
   }, [campaignId])
 
   const tabs = [
@@ -160,9 +164,8 @@ export function CampaignTabs({ campaignId, pollForLeads = false }: Props) {
                   <tr className="border-b border-zinc-700/50 text-left text-xs font-medium uppercase tracking-wider text-zinc-500">
                     <th className="py-3 px-4">Business Name</th>
                     <th className="py-3 px-4">Email</th>
-                    <th className="py-3 px-4">Phone</th>
                     <th className="py-3 px-4">Website</th>
-                    <th className="py-3 px-4">Status</th>
+                    <th className="py-3 px-4">Stage</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -185,7 +188,6 @@ export function CampaignTabs({ campaignId, pollForLeads = false }: Props) {
                           "—"
                         )}
                       </td>
-                      <td className="py-3 px-4 text-zinc-400">{lead.phone ?? "—"}</td>
                       <td className="py-3 px-4 text-zinc-400">
                         {lead.website ? (
                           <a
@@ -200,10 +202,8 @@ export function CampaignTabs({ campaignId, pollForLeads = false }: Props) {
                           "—"
                         )}
                       </td>
-                      <td className="py-3 px-4">
-                        <span className="inline-flex items-center rounded-full border border-zinc-600/60 bg-zinc-700/40 px-2.5 py-0.5 text-xs font-medium capitalize text-zinc-300">
-                          {lead.status ?? "Cold"}
-                        </span>
+                      <td className="py-3 px-4 text-zinc-400">
+                        {lead.deal_stage?.trim() ? lead.deal_stage : "—"}
                       </td>
                     </tr>
                   ))}
@@ -214,22 +214,10 @@ export function CampaignTabs({ campaignId, pollForLeads = false }: Props) {
         )}
 
         {activeTab === "scheduled" && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className={`${CARD_STYLE} border-blue-500/20 bg-gradient-to-br from-blue-600/20 to-blue-900/20 bg-zinc-800/60`}>
-              <p className="text-sm uppercase tracking-wide text-neutral-300">Initial Messages</p>
-              <p className="text-3xl font-semibold tabular-nums">{d.sendingStats.initial}</p>
-            </div>
-            <div className={`${CARD_STYLE} border-amber-500/20 bg-gradient-to-br from-amber-600/20 to-amber-900/20 bg-zinc-800/60`}>
-              <p className="text-sm uppercase tracking-wide text-neutral-300">Nudges</p>
-              <p className="text-3xl font-semibold tabular-nums">{d.sendingStats.nudge}</p>
-            </div>
-            <div className={`${CARD_STYLE} border-purple-500/20 bg-gradient-to-br from-purple-600/20 to-purple-900/20 bg-zinc-800/60`}>
-              <p className="text-sm uppercase tracking-wide text-neutral-300">Follow-Ups</p>
-              <p className="text-3xl font-semibold tabular-nums">{d.sendingStats.followUp}</p>
-            </div>
-            <div className={`${CARD_STYLE} border-emerald-500/20 bg-gradient-to-br from-emerald-600/20 to-emerald-900/20 bg-zinc-800/60`}>
-              <p className="text-sm uppercase tracking-wide text-neutral-300">Final Check-ins</p>
-              <p className="text-3xl font-semibold tabular-nums">{d.sendingStats.final}</p>
+              <p className="text-sm uppercase tracking-wide text-neutral-300">Messages Sent</p>
+              <p className="text-3xl font-semibold tabular-nums">{d.sendingStats.messagesSent}</p>
             </div>
           </div>
         )}
@@ -289,7 +277,7 @@ export function CampaignTabs({ campaignId, pollForLeads = false }: Props) {
               </p>
             </div>
             <div className={`${CARD_STYLE} border-emerald-500/20 bg-gradient-to-br from-emerald-600/20 to-emerald-900/20 bg-zinc-800/60`}>
-              <p className="text-sm uppercase tracking-wide text-neutral-300">Interested Leads</p>
+              <p className="text-sm uppercase tracking-wide text-neutral-300">Engaged leads</p>
               <p className="text-3xl font-semibold tabular-nums">{d.analytics.interestedLeads}</p>
             </div>
             <div className={`${CARD_STYLE} border-cyan-500/20 bg-gradient-to-br from-cyan-600/20 to-cyan-900/20 bg-zinc-800/60`}>

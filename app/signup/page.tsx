@@ -32,7 +32,7 @@ export default function SignupPage() {
   }
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-gradient-to-b from-zinc-950 via-zinc-900 to-zinc-950 text-white">
+    <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto bg-gradient-to-b from-zinc-950 via-zinc-900 to-zinc-950 py-8 text-white">
       <div className="bg-zinc-900 border border-zinc-700/50 p-8 rounded-xl w-full max-w-md space-y-4">
         <h1 className="text-xl font-semibold">Sign up</h1>
 

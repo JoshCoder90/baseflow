@@ -1,70 +1,98 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 
-type Message = { role: string; content?: string | null }
+type MessageRow = { role: string; content?: string | null }
 
 type Props = {
-  messages: Message[]
+  leadId: string
   onInsertReply?: (text: string) => void
 }
 
-export function AIReplySuggestion({ messages, onInsertReply }: Props) {
-  const [replyText, setReplyText] = useState("")
-  const [loading, setLoading] = useState(false)
+export function AIReplySuggestion({ leadId, onInsertReply }: Props) {
+  const [suggestions, setSuggestions] = useState<string[]>([])
+  const [loadingSuggestions, setLoadingSuggestions] = useState(false)
+  const suggestionsRequestId = useRef(0)
 
-  async function generateReply() {
-    setLoading(true)
+  const generateSuggestions = useCallback(async (id: string) => {
+    const req = ++suggestionsRequestId.current
+    setLoadingSuggestions(true)
+    setSuggestions([])
     try {
-      const res = await fetch("/api/generate-reply", {
+      const res = await fetch(
+        `/api/messages?lead_id=${encodeURIComponent(id)}`,
+        { credentials: "include", cache: "no-store" }
+      )
+      if (req !== suggestionsRequestId.current) return
+      if (!res.ok) {
+        setSuggestions([])
+        return
+      }
+      const data = (await res.json()) as { messages?: MessageRow[] }
+      const rows = Array.isArray(data.messages) ? data.messages : []
+      if (rows.length === 0) {
+        setSuggestions([])
+        return
+      }
+
+      const mappedMessages = rows.map((m) => ({
+        role: m.role === "inbound" || m.role === "lead" ? "user" : "assistant",
+        content: m.content ?? "",
+      }))
+
+      const aiRes = await fetch("/api/generate-reply", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages }),
+        body: JSON.stringify({ messages: mappedMessages }),
       })
-      const data = await res.json()
-      setReplyText(data.reply ?? "")
+      const replyData = await aiRes.json()
+      const reply = replyData.reply ?? ""
+      const opts = reply
+        .split(/OPTION \d+:\s*/i)
+        .map((s: string) => s.trim())
+        .filter(Boolean)
+      if (req !== suggestionsRequestId.current) return
+      setSuggestions(opts.slice(0, 3))
     } catch {
-      setReplyText("")
+      if (req === suggestionsRequestId.current) setSuggestions([])
     } finally {
-      setLoading(false)
+      if (req === suggestionsRequestId.current) setLoadingSuggestions(false)
     }
-  }
+  }, [])
 
   useEffect(() => {
-    generateReply()
-  }, [messages])
+    if (!leadId) return
+    void generateSuggestions(leadId)
+  }, [leadId, generateSuggestions])
 
-  const options = replyText
-    ? replyText
-        .split(/OPTION \d+:\s*/i)
-        .map((s) => s.trim())
-        .filter(Boolean)
-    : []
+  function handleRegenerate() {
+    void generateSuggestions(leadId)
+  }
 
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4 mt-6">
-      <h3 className="text-sm text-zinc-400 mb-2">
-        AI REPLY SUGGESTIONS
-      </h3>
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <h3 className="text-sm text-zinc-400">AI REPLY SUGGESTIONS</h3>
+        <button
+          type="button"
+          disabled={loadingSuggestions}
+          onClick={handleRegenerate}
+          className="text-xs text-blue-400 hover:text-blue-300 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Regenerate
+        </button>
+      </div>
 
-      {loading ? (
-        <div className="bg-blue-950/40 p-3 rounded-md text-sm text-blue-200">
-          Generating...
-        </div>
-      ) : options.length === 0 ? (
-        <div className="bg-blue-950/40 p-3 rounded-md text-sm text-blue-200">
-          No suggestion yet
-        </div>
+      {loadingSuggestions ? (
+        <div className="bg-blue-950/40 p-3 rounded-md text-sm text-blue-200">Generating...</div>
+      ) : suggestions.length === 0 ? (
+        <div className="bg-blue-950/40 p-3 rounded-md text-sm text-blue-200">No suggestion yet</div>
       ) : (
         <div className="space-y-4">
-          {options.map((text, i) => (
+          {suggestions.map((text, i) => (
             <div key={i} className="bg-blue-950/40 p-3 rounded-md">
-              <p className="text-xs font-medium text-zinc-500 mb-1.5">
-                Reply Option {i + 1}
-              </p>
-              <p className="text-sm text-blue-200 whitespace-pre-wrap mb-2">
-                {text.trim()}
-              </p>
+              <p className="text-xs font-medium text-zinc-500 mb-1.5">Reply Option {i + 1}</p>
+              <p className="text-sm text-blue-200 whitespace-pre-wrap mb-2">{text.trim()}</p>
               <button
                 type="button"
                 onClick={() => onInsertReply?.(text.trim())}
@@ -76,17 +104,6 @@ export function AIReplySuggestion({ messages, onInsertReply }: Props) {
           ))}
         </div>
       )}
-
-      <div className="flex gap-2 mt-3">
-        <button
-          type="button"
-          onClick={generateReply}
-          disabled={loading}
-          className="px-3 py-1 text-sm border border-zinc-700 rounded-md hover:bg-zinc-800 transition disabled:opacity-50"
-        >
-          Regenerate
-        </button>
-      </div>
     </div>
   )
 }

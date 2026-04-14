@@ -3,34 +3,10 @@
 import { useState } from "react"
 import { useRouter } from "next/navigation"
 import { supabase } from "@/lib/supabase"
-import { FollowUpBuilder, DEFAULT_FOLLOW_UP_STEPS, type FollowUpStep } from "./FollowUpBuilder"
-
-const TYPE_LABELS: Record<string, string> = {
-  bump: "Bump",
-  nudge: "Nudge",
-  followup: "Follow-up",
-  final: "Final Check-in",
-}
-
-function parseFollowUps(
-  raw: string | FollowUpStep[] | null | undefined
-): FollowUpStep[] {
-  if (raw == null) return []
-  if (Array.isArray(raw)) return raw
-  if (typeof raw !== "string") return []
-  try {
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : []
-  } catch {
-    return []
-  }
-}
 
 type Props = {
   campaignId: string
-  channel?: string | null
   messageTemplate: string | null
-  followUpSchedule: string | null
   subject?: string | null
   targetAudience: string | null
   audienceNiche?: string | null
@@ -44,9 +20,7 @@ type Props = {
 
 export function CampaignDetailsEditor({
   campaignId,
-  channel: initialChannel,
   messageTemplate,
-  followUpSchedule,
   subject: initialSubject,
   targetAudience,
   audienceNiche,
@@ -57,26 +31,23 @@ export function CampaignDetailsEditor({
 }: Props) {
   const router = useRouter()
   const [isEditing, setIsEditing] = useState(editMode)
-  const [channelEdit, setChannelEdit] = useState<"sms" | "email" | "auto">(
-    (initialChannel as "sms" | "email" | "auto") || "sms"
-  )
   const [subjectEdit, setSubjectEdit] = useState(initialSubject ?? "Quick question")
   const [messageTemplateEdit, setMessageTemplateEdit] = useState(
     messageTemplate ?? ""
   )
-  const [followUps, setFollowUps] = useState<FollowUpStep[]>(() => {
-    const parsed = parseFollowUps(followUpSchedule)
-    return parsed.length > 0 ? parsed : DEFAULT_FOLLOW_UP_STEPS
-  })
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [generating, setGenerating] = useState(false)
+  const [aiNiche, setAiNiche] = useState(audienceNiche ?? "")
+  const [aiOffer, setAiOffer] = useState("")
+  const [aiTone, setAiTone] = useState<"Casual" | "Direct" | "Friendly">("Friendly")
+  const [aiGoal, setAiGoal] = useState("")
+  const [aiCompany, setAiCompany] = useState("")
+  const [aiGenerating, setAiGenerating] = useState(false)
 
   function handleCancel() {
-    setChannelEdit((initialChannel as "sms" | "email" | "auto") || "sms")
     setSubjectEdit(initialSubject ?? "Quick question")
     setMessageTemplateEdit(messageTemplate ?? "")
-    setFollowUps(parseFollowUps(followUpSchedule))
     setError(null)
     onCancel?.()
   }
@@ -84,13 +55,10 @@ export function CampaignDetailsEditor({
   async function handleSave() {
     setError(null)
     setSubmitting(true)
-    const followUpSteps = followUps.filter((s) => s.day >= 3)
-    const followUpJson = JSON.stringify(followUpSteps)
     const payload = {
-      channel: channelEdit,
+      channel: "email" as const,
       subject: subjectEdit.trim() || "Quick question",
       message_template: messageTemplateEdit.trim() || null,
-      follow_up_schedule: followUpJson,
     }
     try {
       const { error: updateError } = await supabase
@@ -141,6 +109,39 @@ export function CampaignDetailsEditor({
     }
   }
 
+  async function handleGenerateEmail() {
+    const niche = aiNiche.trim() || audienceNiche?.trim() || targetAudience?.trim()
+    if (!niche) {
+      setError("Enter a niche to generate")
+      return
+    }
+    setError(null)
+    setAiGenerating(true)
+    try {
+      const res = await fetch("/api/generate-email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          niche,
+          offer: aiOffer.trim() || undefined,
+          tone: aiTone,
+          goal: aiGoal.trim() || undefined,
+          company: aiCompany.trim() || undefined,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? "Failed to generate")
+      if (data.subject) setSubjectEdit(data.subject)
+      if (data.body) setMessageTemplateEdit(data.body)
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to generate email"
+      )
+    } finally {
+      setAiGenerating(false)
+    }
+  }
+
   if (isEditing || editMode) {
     return (
       <div className="space-y-4">
@@ -149,34 +150,99 @@ export function CampaignDetailsEditor({
             {error}
           </div>
         )}
-        <div>
-          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">
-            Outreach channel
-          </label>
-          <div className="mt-1 flex flex-col gap-2">
-            {(["sms", "email", "auto"] as const).map((opt) => (
-              <label
-                key={opt}
-                className="flex items-center gap-3 cursor-pointer rounded-xl border border-zinc-700 bg-zinc-800/80 px-4 py-2.5 hover:bg-zinc-800 transition"
-              >
-                <input
-                  type="radio"
-                  name="channel-edit"
-                  checked={channelEdit === opt}
-                  onChange={() => setChannelEdit(opt)}
-                  className="h-4 w-4 rounded border-zinc-600 bg-zinc-800 text-blue-600 focus:ring-blue-500/30"
-                />
-                <span className="text-sm text-zinc-200">
-                  {opt === "sms"
-                    ? "SMS"
-                    : opt === "email"
-                      ? "Email"
-                      : "Auto (SMS if phone exists, otherwise email)"}
-                </span>
+
+        {/* AI Email Generator */}
+        <div className="rounded-xl border border-zinc-700/60 bg-zinc-800/40 p-5">
+          <h3 className="text-sm font-semibold text-white mb-4">AI Email Generator</h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">
+                Niche
               </label>
-            ))}
+              <input
+                type="text"
+                value={aiNiche}
+                onChange={(e) => setAiNiche(e.target.value)}
+                placeholder="e.g. Dental offices, SaaS startups"
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-800/80 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-500 outline-none transition focus:border-zinc-600 focus:ring-2 focus:ring-blue-500/30"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">
+                Offer
+              </label>
+              <input
+                type="text"
+                value={aiOffer}
+                onChange={(e) => setAiOffer(e.target.value)}
+                placeholder="e.g. Free audit, 15-min call"
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-800/80 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-500 outline-none transition focus:border-zinc-600 focus:ring-2 focus:ring-blue-500/30"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">
+                Tone
+              </label>
+              <select
+                value={aiTone}
+                onChange={(e) => setAiTone(e.target.value as "Casual" | "Direct" | "Friendly")}
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-800/80 px-3 py-2 text-sm text-zinc-200 outline-none transition focus:border-zinc-600 focus:ring-2 focus:ring-blue-500/30"
+              >
+                <option value="Casual">Casual</option>
+                <option value="Direct">Direct</option>
+                <option value="Friendly">Friendly</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">
+                Goal
+              </label>
+              <input
+                type="text"
+                value={aiGoal}
+                onChange={(e) => setAiGoal(e.target.value)}
+                placeholder="e.g. Book a demo, schedule a call"
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-800/80 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-500 outline-none transition focus:border-zinc-600 focus:ring-2 focus:ring-blue-500/30"
+              />
+            </div>
+            <div className="sm:col-span-2">
+              <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">
+                Company <span className="text-zinc-600">(optional)</span>
+              </label>
+              <input
+                type="text"
+                value={aiCompany}
+                onChange={(e) => setAiCompany(e.target.value)}
+                placeholder="Specific company name if targeting one"
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-800/80 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-500 outline-none transition focus:border-zinc-600 focus:ring-2 focus:ring-blue-500/30"
+              />
+            </div>
           </div>
+          <button
+            type="button"
+            onClick={handleGenerateEmail}
+            disabled={aiGenerating || !(aiNiche.trim() || audienceNiche?.trim() || targetAudience?.trim())}
+            className="mt-4 flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-500 transition disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {aiGenerating ? (
+              <>
+                <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden>
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                </svg>
+                Generating…
+              </>
+            ) : (
+              <>
+                <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden>
+                  <path d="M12 0L14.59 5.41L20 8l-5.41 2.59L12 16l-2.59-5.41L4 8l5.41-2.59L12 0z" />
+                </svg>
+                Generate Email
+              </>
+            )}
+          </button>
         </div>
+
         <div>
           <label
             htmlFor="subject-edit"
@@ -225,19 +291,6 @@ export function CampaignDetailsEditor({
             {generating ? "Generating…" : "Generate Outreach Script"}
           </button>
         </div>
-        <div>
-          <label className="block text-xs font-medium text-zinc-500 uppercase tracking-wider mb-1.5">
-            Follow-up schedule
-          </label>
-          <div className="mt-1">
-            <FollowUpBuilder
-              value={followUps}
-              onChange={setFollowUps}
-              niche={audienceNiche ?? targetAudience ?? undefined}
-              initialMessage={messageTemplateEdit}
-            />
-          </div>
-        </div>
         <div className="flex gap-3 pt-2">
           {showCancel && (
             <button
@@ -262,8 +315,6 @@ export function CampaignDetailsEditor({
     )
   }
 
-  const parsedFollowUps = parseFollowUps(followUpSchedule)
-
   return (
     <div className="space-y-4">
       <div>
@@ -272,39 +323,6 @@ export function CampaignDetailsEditor({
         </dt>
         <dd className="mt-1 text-sm text-zinc-200 whitespace-pre-wrap">
           {messageTemplate ?? "—"}
-        </dd>
-      </div>
-      <div>
-        <dt className="text-xs font-medium text-zinc-500 uppercase tracking-wider mb-3">
-          Follow-up schedule
-        </dt>
-        <dd className="mt-1">
-          {parsedFollowUps.length === 0 ? (
-            <p className="text-sm text-zinc-500">—</p>
-          ) : (
-            <div className="flex flex-col gap-y-0">
-              {parsedFollowUps.map((step, i) => (
-                <div key={i} className="flex gap-4">
-                  <div className="flex flex-col items-center shrink-0">
-                    <div className="w-2.5 h-2.5 rounded-full bg-blue-500 shrink-0" />
-                    {i < parsedFollowUps.length - 1 && (
-                      <div className="w-px flex-1 min-h-[24px] bg-zinc-700 mx-auto mt-1" />
-                    )}
-                  </div>
-                  <div className="flex-1 min-w-0 pb-6 last:pb-0">
-                    <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-                      <div className="text-sm text-zinc-400">
-                        Day {step.day} — {TYPE_LABELS[step.type] ?? step.type}
-                      </div>
-                      <div className="mt-2 text-sm text-white whitespace-pre-line">
-                        {step.template ?? "—"}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
         </dd>
       </div>
       <button

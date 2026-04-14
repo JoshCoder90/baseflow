@@ -5,7 +5,7 @@
       "schedule": "* * * * *"
     },
     {
-      "path": "/api/send-messages",
+      "path": "/api/process-send-queue",
       "schedule": "* * * * *"
     }
   ]

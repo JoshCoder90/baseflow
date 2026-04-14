@@ -1,31 +1,47 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createClient } from "@/lib/supabase/server"
-import { resolveChannel, type CampaignChannel } from "@/lib/campaign-send"
+import { OUTBOUND_EMAIL_CHANNEL } from "@/lib/outbound-channel"
+import {
+  INPUT_MAX,
+  validateText,
+  validateUuid,
+} from "@/lib/api-input-validation"
+import { rateLimitResponse } from "@/lib/rateLimit"
 
 /**
- * Send a campaign message to a lead.
- * Resolves channel (sms/email/auto) and stores message. Actual delivery is stubbed.
+ * Record an outbound message to a lead (email-only). Delivery is stubbed.
  */
 export async function POST(req: NextRequest) {
-  const body = await req.json()
-  const { campaign_id: campaignId, lead_id: leadId, content } = body
+  const _rl = rateLimitResponse(req)
+  if (_rl) return _rl
 
-  if (!campaignId || !leadId || !content?.trim()) {
-    return NextResponse.json(
-      { error: "campaign_id, lead_id, and content are required" },
-      { status: 400 }
-    )
-  }
+  const body = await req.json()
+  const vc = validateUuid(body.campaign_id, "campaign_id")
+  if (!vc.ok) return vc.response
+  const vl = validateUuid(body.lead_id, "lead_id")
+  if (!vl.ok) return vl.response
+  const vcontent = validateText(body.content, {
+    required: true,
+    maxLen: INPUT_MAX.long,
+    field: "content",
+  })
+  if (!vcontent.ok) return vcontent.response
+
+  const campaignId = vc.value
+  const leadId = vl.value
+  const content = vcontent.value
 
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
   const { data: campaign, error: campaignError } = await supabase
     .from("campaigns")
-    .select("id, user_id, audience_id, channel")
+    .select("id, user_id, audience_id")
     .eq("id", campaignId)
     .single()
 
@@ -35,7 +51,7 @@ export async function POST(req: NextRequest) {
 
   const { data: lead, error: leadError } = await supabase
     .from("leads")
-    .select("id, audience_id, campaign_id, phone, email")
+    .select("id, audience_id, campaign_id, email")
     .eq("id", leadId)
     .single()
 
@@ -48,34 +64,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Lead not found in campaign" }, { status: 404 })
   }
 
-  const channel = resolveChannel(
-    (campaign.channel as CampaignChannel) ?? "sms",
-    { id: lead.id, phone: lead.phone, email: lead.email }
-  )
-
-  if (!channel) {
+  const email = typeof lead.email === "string" ? lead.email.trim() : ""
+  if (!email) {
     return NextResponse.json(
-      {
-        error:
-          "Lead has no phone (for SMS) or email (for Email). Update campaign channel or add contact info.",
-      },
+      { error: "Lead has no email address. Add an email before sending." },
       { status: 400 }
     )
   }
-
-  // TODO: Actual delivery via Twilio (SMS) or Resend (Email)
-  // if (channel === "sms") await sendSms(lead.phone!, content)
-  // if (channel === "email") await sendEmail(lead.email!, content)
 
   const { data: message, error: insertError } = await supabase
     .from("messages")
     .insert({
       lead_id: leadId,
       role: "outbound",
-      content: content.trim(),
-      channel,
+      content,
     })
-    .select("id")
+    .select("*")
     .single()
 
   if (insertError) {
@@ -89,6 +93,6 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({
     success: true,
     message_id: message?.id,
-    channel,
+    channel: OUTBOUND_EMAIL_CHANNEL,
   })
 }

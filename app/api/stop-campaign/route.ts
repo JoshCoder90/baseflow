@@ -1,11 +1,16 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createClient } from "@supabase/supabase-js"
 import { createClient as createServerClient } from "@/lib/supabase/server"
+import { validateUuid } from "@/lib/api-input-validation"
+import { rateLimitResponse } from "@/lib/rateLimit"
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY || ""
 
 export async function POST(req: NextRequest) {
+  const _rl = rateLimitResponse(req)
+  if (_rl) return _rl
+
   console.log("STOP CAMPAIGN HIT")
 
   let body: { campaignId?: string }
@@ -15,10 +20,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
   }
 
-  const campaignId = body.campaignId
-  if (!campaignId) {
-    return NextResponse.json({ error: "campaignId required" }, { status: 400 })
-  }
+  const vId = validateUuid(body.campaignId, "campaignId")
+  if (!vId.ok) return vId.response
+  const campaignId = vId.value
 
   if (!supabaseServiceKey) {
     return NextResponse.json(

@@ -1,16 +1,36 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createClient } from "@/lib/supabase/server"
+import {
+  INPUT_MAX,
+  validatePlaceId,
+  validateText,
+  validateUuid,
+} from "@/lib/api-input-validation"
+import { heavyRouteIpLimitResponse } from "@/lib/ip-rate-limit"
+import { rateLimitResponse } from "@/lib/rateLimit"
 
 export async function POST(req: NextRequest) {
-  const body = await req.json()
-  const { audience_id: audienceId, place_id: placeId, email } = body
+  const _ip = heavyRouteIpLimitResponse(req, "leads-add-from-place")
+  if (_ip) return _ip
 
-  if (!audienceId || !placeId) {
-    return NextResponse.json(
-      { error: "audience_id and place_id are required" },
-      { status: 400 }
-    )
-  }
+  const _rl = rateLimitResponse(req)
+  if (_rl) return _rl
+
+  const body = await req.json()
+  const va = validateUuid(body.audience_id, "audience_id")
+  if (!va.ok) return va.response
+  const vp = validatePlaceId(body.place_id, "place_id")
+  if (!vp.ok) return vp.response
+  const ve = validateText(body.email, {
+    required: false,
+    maxLen: INPUT_MAX.email,
+    field: "email",
+  })
+  if (!ve.ok) return ve.response
+
+  const audienceId = va.value
+  const placeId = vp.value
+  const email = ve.value.length > 0 ? ve.value : undefined
 
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -60,7 +80,7 @@ export async function POST(req: NextRequest) {
   }
 
   // Fetch Place Details
-  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_PLACES_API_KEY
+  const apiKey = process.env.GOOGLE_PLACES_API_KEY
   if (!apiKey) {
     return NextResponse.json(
       { error: "API key not configured" },
@@ -73,7 +93,7 @@ export async function POST(req: NextRequest) {
   detailsUrl.searchParams.set("key", apiKey)
   detailsUrl.searchParams.set(
     "fields",
-    "name,formatted_address,formatted_phone_number,website,rating"
+    "name,formatted_address,website,rating"
   )
 
   const detailsRes = await fetch(detailsUrl.toString())
@@ -95,14 +115,13 @@ export async function POST(req: NextRequest) {
       user_id: user.id,
       name: r?.name ?? null,
       address: r?.formatted_address ?? null,
-      phone: r?.formatted_phone_number ?? null,
-      email: email?.trim() || null,
+      email: email ?? null,
       website: r?.website ?? null,
       google_rating: r?.rating ?? null,
       status: "new",
       place_id: placeId,
     })
-    .select("id, name, address, phone, website, google_rating, status")
+    .select("id, name, address, website, google_rating, status")
     .single()
 
   if (insertError) {

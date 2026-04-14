@@ -1,7 +1,10 @@
 import dotenv from "dotenv"
+import { rateLimitResponse } from "@/lib/rateLimit"
 dotenv.config({ path: ".env.local" })
 
 import { NextResponse } from "next/server"
+import { validateUuid } from "@/lib/api-input-validation"
+import { heavyRouteIpLimitResponse } from "@/lib/ip-rate-limit"
 import OpenAI from "openai"
 import { createClient } from "@supabase/supabase-js"
 
@@ -17,18 +20,24 @@ const supabase = createClient(
 )
 
 export async function POST(req: Request) {
+  const _ip = heavyRouteIpLimitResponse(req, "generate-summary")
+  if (_ip) return _ip
+
+  const _rl = rateLimitResponse(req)
+  if (_rl) return _rl
+
   try {
     if (!process.env.OPENAI_API_KEY) {
       return NextResponse.json({ error: "OPENAI_API_KEY missing" }, { status: 500 })
     }
-    const { leadId } = await req.json()
-    if (!leadId) {
-      return NextResponse.json({ error: "leadId required" }, { status: 400 })
-    }
+    const { leadId: leadIdRaw } = await req.json()
+    const v = validateUuid(leadIdRaw, "leadId")
+    if (!v.ok) return v.response
+    const leadId = v.value
 
     const { data: messages, error: messagesError } = await supabase
       .from("messages")
-      .select("role, content, created_at")
+      .select("*")
       .eq("lead_id", leadId)
       .order("created_at", { ascending: true })
 
@@ -47,57 +56,29 @@ export async function POST(req: Request) {
       messages: [
         {
           role: "system",
-          content: `You are an AI CRM assistant helping sales teams prioritize leads.
-
-Analyze the conversation between a sales rep and a lead.
-
-Your job is to determine how likely the lead is to convert.
-
-Use this scoring framework:
-
-Start with a base score of 20.
-
-Add points based on these signals:
-
-+20 if the lead asks about services or what the company offers
-+30 if the lead asks about pricing, demos, results, or ROI
-+20 if the lead sends multiple messages or engages actively
-+30 if the lead mentions timing or urgency (soon, next month, immediately)
-
-Score interpretation:
-
-0–30 = Cold lead
-31–60 = Medium interest
-61–80 = Strong interest
-81–100 = Hot lead
+          content: `You are an AI CRM assistant. Read the conversation between a sales rep and a lead.
 
 Return ONLY valid JSON using this format:
 
 {
-"leadScore": number,
-"intent": "Low" | "Medium" | "High",
 "recommendedAction": string,
 "insights": [string, string, string, string]
 }
 
 Rules:
 
-leadScore must be between 0 and 100
-intent should match the score range
 recommendedAction should suggest the next step a sales rep should take
-insights should be short bullet-style observations about the lead
+insights should be short bullet-style observations (no numeric scores or labels like hot/cold/warm/intent)
 
 Example output:
 
 {
-"leadScore": 50,
-"intent": "Medium",
-"recommendedAction": "Follow up with more details about the lead generation service",
+"recommendedAction": "Follow up with more details about your offer",
 "insights": [
 "Lead asked about services",
-"Shows initial interest",
-"Conversation engagement is minimal",
-"Follow-up likely needed"
+"Conversation has a few back-and-forth messages",
+"Next step is unclear — suggest a concrete ask",
+"Keep tone friendly and brief"
 ]
 }`
         },
@@ -111,8 +92,6 @@ Example output:
     const content = response.choices[0].message.content || "{}"
 
     let data: {
-      leadScore: number
-      intent: string
       recommendedAction: string
       insights: string[]
     }
@@ -121,11 +100,16 @@ Example output:
       data = JSON.parse(content)
     } catch {
       data = {
-        leadScore: 50,
-        intent: "Medium",
         recommendedAction: "Follow up with the lead",
         insights: ["AI could not analyze this conversation"]
       }
+    }
+
+    if (!Array.isArray(data.insights)) {
+      data.insights = []
+    }
+    if (typeof data.recommendedAction !== "string") {
+      data.recommendedAction = "Follow up with the lead"
     }
 
     const summaryForDb = JSON.stringify(data)

@@ -1,8 +1,11 @@
 import Link from "next/link"
-import { notFound } from "next/navigation"
-import { supabase } from "@/lib/supabase"
+import { notFound, redirect } from "next/navigation"
+import type { SupabaseClient } from "@supabase/supabase-js"
+import { createClient } from "@/lib/supabase/server"
 import { CampaignDetailContent } from "../components/CampaignDetailContent"
 import { CampaignStatusBadge } from "../components/CampaignStatusBadge"
+
+const PAGE_DEBUG = "campaign_detail"
 
 type Campaign = {
   id: string
@@ -21,10 +24,10 @@ type Campaign = {
     target_leads?: number | null
   } | null
   message_template?: string | null
-  follow_up_schedule?: string | null
   status?: string | null
   notes?: string | null
   created_at?: string | null
+  sent_count?: number | null
 }
 
 function getNicheLabel(campaign: Campaign): string {
@@ -41,31 +44,124 @@ function getNicheLabel(campaign: Campaign): string {
   return campaign.target_audience ?? "—"
 }
 
-async function getCampaign(id: string): Promise<Campaign | null> {
-  const { data, error } = await supabase
-    .from("campaigns")
-    .select("*, audiences(id, name, niche, location, leads_collected, target_leads)")
-    .eq("id", id)
-    .single()
-
-  if (error || !data) return null
-  return data as Campaign
+function emptyCampaignShell(campaignId: string): Campaign {
+  return {
+    id: campaignId,
+    name: null,
+    target_audience: null,
+    target_search_query: null,
+    lead_generation_status: null,
+    audience_id: null,
+    channel: null,
+    audiences: null,
+    message_template: null,
+    status: null,
+    notes: null,
+    created_at: null,
+    sent_count: null,
+  }
 }
 
-async function getLeadCount(campaignId: string, audienceId: string | null): Promise<number> {
-  const { count: byCampaign } = await supabase
-    .from("leads")
-    .select("id", { count: "exact", head: true })
-    .eq("campaign_id", campaignId)
-  if ((byCampaign ?? 0) > 0) return byCampaign ?? 0
-  if (audienceId) {
-    const { count: byAudience } = await supabase
+/**
+ * STEP A: `campaigns` row only for this user.
+ * STEP B: audience + sent count in parallel; failures → log + fallbacks (never 404).
+ */
+async function loadCampaignForDetailPage(
+  supabase: SupabaseClient,
+  campaignId: string,
+  authenticatedUserId: string
+): Promise<Campaign> {
+  console.log(`[${PAGE_DEBUG}] load`, {
+    page: PAGE_DEBUG,
+    requestedId: campaignId,
+    authenticatedUserId,
+  })
+
+  const {
+    data: campaignRow,
+    error: campaignErr,
+  } = await supabase
+    .from("campaigns")
+    .select("*")
+    .eq("id", campaignId)
+    .eq("user_id", authenticatedUserId)
+    .maybeSingle()
+
+  console.log(`[${PAGE_DEBUG}] main row`, {
+    page: PAGE_DEBUG,
+    requestedId: campaignId,
+    authenticatedUserId,
+    mainRowFound: Boolean(campaignRow),
+    mainQueryError: campaignErr?.message ?? null,
+  })
+
+  if (campaignErr) {
+    console.error(`[${PAGE_DEBUG}] campaigns query error`, {
+      requestedId: campaignId,
+      authenticatedUserId,
+      error: campaignErr,
+    })
+  }
+
+  if (!campaignRow) {
+    if (!campaignErr) {
+      notFound()
+    }
+    console.log(`[${PAGE_DEBUG}] using shell after primary query error`, {
+      requestedId: campaignId,
+      authenticatedUserId,
+    })
+    return emptyCampaignShell(campaignId)
+  }
+
+  const audienceId = campaignRow.audience_id as string | null | undefined
+
+  const [audienceRes, leadsCountRes] = await Promise.all([
+    audienceId
+      ? supabase
+          .from("audiences")
+          .select("id, name, niche, location, leads_collected, target_leads")
+          .eq("id", audienceId)
+          .maybeSingle()
+      : Promise.resolve({ data: null as null, error: null as null }),
+    supabase
       .from("leads")
       .select("id", { count: "exact", head: true })
-      .eq("audience_id", audienceId)
-    return byAudience ?? 0
+      .eq("campaign_id", campaignId)
+      .in("status", ["sent", "messaged"]),
+  ])
+
+  let audiences: Campaign["audiences"] = null
+  if (audienceId) {
+    if (audienceRes.error) {
+      console.error(`[${PAGE_DEBUG}] secondary audiences query error`, {
+        requestedId: campaignId,
+        authenticatedUserId,
+        audienceId,
+        error: audienceRes.error,
+      })
+    } else {
+      audiences = audienceRes.data as Campaign["audiences"]
+    }
   }
-  return 0
+
+  let sentCount: number | null =
+    (campaignRow as { sent_count?: number | null }).sent_count ?? null
+  if (leadsCountRes.error) {
+    console.error(`[${PAGE_DEBUG}] secondary leads count query error`, {
+      requestedId: campaignId,
+      authenticatedUserId,
+      error: leadsCountRes.error,
+    })
+  } else if (typeof leadsCountRes.count === "number") {
+    sentCount = leadsCountRes.count
+  }
+
+  return {
+    ...(campaignRow as Campaign),
+    audiences,
+    sent_count: sentCount ?? 0,
+  }
 }
 
 export default async function CampaignDetailPage({
@@ -74,10 +170,18 @@ export default async function CampaignDetailPage({
   params: Promise<{ id: string }>
 }) {
   const { id } = await params
-  const campaign = await getCampaign(id)
-  if (!campaign) notFound()
+  const supabase = await createClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
 
-  const leadCount = await getLeadCount(campaign.id, campaign.audience_id ?? null)
+  const authenticatedUserId = user?.id ?? ""
+  if (!authenticatedUserId) {
+    redirect("/login")
+  }
+
+  const campaign = await loadCampaignForDetailPage(supabase, id, authenticatedUserId)
+
   const nicheLabel = getNicheLabel(campaign)
 
   return (
@@ -105,7 +209,7 @@ export default async function CampaignDetailPage({
           </div>
         </header>
 
-        <CampaignDetailContent campaign={campaign} leadCount={leadCount} />
+        <CampaignDetailContent campaign={campaign} />
       </div>
     </div>
   )

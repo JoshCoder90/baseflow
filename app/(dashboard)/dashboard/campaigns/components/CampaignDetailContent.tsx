@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useCallback } from "react"
 import { useRouter } from "next/navigation"
 import { supabase } from "@/lib/supabase"
 import { CampaignStatusBadge } from "./CampaignStatusBadge"
@@ -9,10 +9,14 @@ import { CampaignNotes } from "./CampaignNotes"
 import { CampaignLeadsTable } from "./CampaignLeadsTable"
 import { MessageFormatTab } from "./MessageFormatTab"
 import { LeadGenerationProgress } from "./LeadGenerationProgress"
-import { CampaignActivity } from "./CampaignActivity"
 import { CampaignRepliesTab } from "./CampaignRepliesTab"
-import { CampaignQueueTab } from "./CampaignQueueTab"
+import { CampaignQueueTab, type CampaignQueueMessageRow } from "./CampaignQueueTab"
 import { ScrapingProgressBar } from "./ScrapingProgressBar"
+import { contactKeyForCampaignLead, MAX_LEADS_PER_CAMPAIGN } from "@/lib/campaign-leads-insert"
+import type { CampaignQueueStats } from "@/lib/get-campaign-stats"
+
+/** `/api/campaign-data` auto-refresh: queue, leads, sending stats (single interval, no overlap with a second poll). */
+const CAMPAIGN_DATA_POLL_MS = 3000
 
 type Campaign = {
   id: string
@@ -20,22 +24,35 @@ type Campaign = {
   target_audience?: string | null
   target_search_query?: string | null
   lead_generation_status?: string | null
+  /** Legacy scope when leads use `audience_id` instead of `campaign_id`. */
   audience_id?: string | null
   channel?: string | null
   audiences?: { id: string; name: string | null; niche: string | null; location: string | null; target_leads?: number | null } | null
   message_template?: string | null
-  follow_up_schedule?: string | null
   subject?: string | null
   status?: string | null
   notes?: string | null
+  sent_count?: number | null
+  leads?: { id: string; name: string | null; email: string | null; status?: string | null }[]
 }
 
 type Props = {
   campaign: Campaign
-  leadCount?: number
 }
 
-type Lead = { id: string; name: string | null; phone: string | null; email: string | null; website?: string | null; status: string | null; company: string | null }
+type Lead = {
+  id: string
+  name: string | null
+  phone: string | null
+  email: string | null
+  website?: string | null
+  status: string | null
+  company: string | null
+  place_id?: string | null
+  /** Scheduled send time from DB (either column may be set). */
+  send_at?: string | null
+  next_send_at?: string | null
+}
 
 function normalizeLead(raw: Record<string, unknown>): Lead {
   const lead: Lead = {
@@ -47,6 +64,9 @@ function normalizeLead(raw: Record<string, unknown>): Lead {
     company: (raw.company as string) ?? null,
   }
   if (raw.website !== undefined) lead.website = (raw.website as string) ?? null
+  if (raw.place_id !== undefined) lead.place_id = (raw.place_id as string) ?? null
+  if (raw.send_at !== undefined) lead.send_at = (raw.send_at as string) ?? null
+  if (raw.next_send_at !== undefined) lead.next_send_at = (raw.next_send_at as string) ?? null
   return lead
 }
 
@@ -57,179 +77,323 @@ function getTargetLabel(campaign: Campaign): string {
   return campaign.target_audience ?? "—"
 }
 
-export function CampaignDetailContent({ campaign, leadCount }: Props) {
-  const router = useRouter()
-  const [isEditing, setIsEditing] = useState(false)
-  const [status, setStatus] = useState<"draft" | "running" | "paused">(
-    (campaign.status === "active" ? "running" : campaign.status === "paused" || campaign.status === "stopped" ? "paused" : "draft") as "draft" | "running" | "paused"
+/** Match API / DB: non-null, non-empty `email` after trim. */
+function leadHasNonEmptyEmail(l: Pick<Lead, "email">): boolean {
+  const e = (l.email ?? "").trim()
+  return e.length > 0
+}
+
+function CampaignStatsLoadingSkeleton() {
+  return (
+    <div className="space-y-6" aria-busy="true" aria-label="Loading campaign">
+      <p className="text-sm font-medium text-zinc-400">Loading campaign...</p>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 animate-pulse">
+        {[0, 1, 2].map((i) => (
+          <div
+            key={i}
+            className="rounded-xl border border-zinc-700/40 bg-zinc-800/30 p-5 h-[5.5rem]"
+          />
+        ))}
+      </div>
+      <div className="h-2 w-full rounded-full bg-zinc-800/80 animate-pulse" />
+      <div className="flex flex-wrap gap-4">
+        <div className="h-28 min-w-[140px] flex-1 rounded-xl bg-zinc-800/40 animate-pulse" />
+        <div className="h-28 min-w-[140px] flex-1 rounded-xl bg-zinc-800/40 animate-pulse" />
+      </div>
+      <div className="rounded-2xl border border-white/10 bg-white/5 p-6">
+        <div className="h-6 w-44 bg-zinc-700/50 rounded mb-6 animate-pulse" />
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="rounded-xl h-24 bg-black/30 animate-pulse" />
+          ))}
+        </div>
+      </div>
+    </div>
   )
-  const [isLoading, setIsLoading] = useState(false)
+}
+
+export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
+  const router = useRouter()
+  const campaign = initialCampaign
+  const campaignId = campaign.id
+
+  const [campaignStatus, setCampaignStatus] = useState<string | null>(
+    initialCampaign.status ?? null
+  )
+
+  /** Idle until click; "starting" = HTTP in flight; "running" = success, waiting until campaign is live/completed. */
+  const [startSendingUi, setStartSendingUi] = useState<"idle" | "starting" | "running">("idle")
+  const [isStopping, setIsStopping] = useState(false)
+
+  const [isEditing, setIsEditing] = useState(false)
   const [activeTab, setActiveTab] = useState<"message" | "leads" | "stats" | "replies" | "notes" | "queue">("stats")
   const [leadGenStatus, setLeadGenStatus] = useState<"generating" | "complete" | "failed">(
     (campaign.lead_generation_status as "generating" | "complete" | "failed") ?? "generating"
   )
-  const [leadGenStage, setLeadGenStage] = useState<"searching" | "enriching" | "complete" | null>(
-    null
-  )
-
+  const [leadGenStage, setLeadGenStage] = useState<
+    "searching" | "enriching" | "filling" | "expanding" | "complete" | null
+  >(null)
   const [leadsForThisCampaign, setLeadsForThisCampaign] = useState<Lead[]>([])
+  /** Outbound queue rows from `campaign_messages` (+ nested lead name/email). */
+  const [queueMessages, setQueueMessages] = useState<CampaignQueueMessageRow[]>([])
+  const [queueStats, setQueueStats] = useState<CampaignQueueStats>({
+    sent: 0,
+    notSent: 0,
+    failed: 0,
+  })
   const [leadsLoading, setLeadsLoading] = useState(true)
-  const [tick, setTick] = useState(0)
-  const [tabsData, setTabsData] = useState<{
-    sendingStats: { messagesSent: number; failedSends: number; replyRate: number; dailySent?: number; dailyLimit?: number }
-    replies: {
-      leadId: string
-      leadName: string
-      company: string
-      messagePreview: string
-      messageContent: string
-      createdAt: string
-      replyStatus: string
-    }[]
-    repliesCount: number
-    nextScheduledAt: string | null
-    currentPhase: string
-    pendingCount?: number
-    uniqueLeadsContacted: number
-    leadsRemaining: number
-  } | null>(null)
+  /** True until first fetch for this campaign completes. */
+  const [isLoading, setIsLoading] = useState(true)
 
+  const activeCampaignIdRef = useRef(campaignId)
+  activeCampaignIdRef.current = campaignId
+  const initialFetchCompletedRef = useRef(false)
+
+  useEffect(() => {
+    setCampaignStatus(initialCampaign.status ?? null)
+  }, [initialCampaign.status])
+
+  useEffect(() => {
+    if (startSendingUi !== "running") return
+    const s = campaignStatus ?? campaign.status ?? "draft"
+    if (s === "active" || s === "sending" || s === "completed") {
+      setStartSendingUi("idle")
+    }
+  }, [startSendingUi, campaignStatus, campaign.status])
+
+  /** Use live status from polling — not only SSR `campaign` props — so periodic refresh keeps UI in sync. */
   const showLeadSection =
-    campaign.target_search_query &&
+    Boolean(campaign.target_search_query) &&
     ["generating", "complete", "failed"].includes(
-      campaign.lead_generation_status ?? ""
+      (leadGenStatus || (campaign.lead_generation_status as string) || "") as string
     )
 
-  const showActivity = status === "running" || status === "paused"
-
-  const campaignId = campaign.id
-  const fetchTabsDataRef = useRef<() => void>(() => {})
-  const fetchLeadsRef = useRef<() => void>(() => {})
-  const lastFetchedCampaignId = useRef<string | null>(null)
-  const isFetching = useRef(false)
-
-  useEffect(() => {
-    const fetchLeads = async () => {
-      const { data } = await supabase
-        .from("leads")
-        .select("*")
-        .eq("campaign_id", campaignId)
-      if (data) {
-        if (data.length > 0) setLeadsForThisCampaign(data)
+  /**
+   * Live DB snapshot: `/api/campaign-data` returns all lead rows (paginated on server).
+   * Total leads / emails found = derive from `leadsForThisCampaign` only (no separate count state).
+   */
+  const fetchCampaignData = useCallback(async () => {
+    const id = campaignId
+    try {
+      const res = await fetch(
+        `/api/campaign-data?id=${encodeURIComponent(campaignId)}`,
+        { cache: "no-store" }
+      )
+      if (!res.ok) {
+        console.error("fetchCampaignData: campaign-data HTTP", res.status, campaignId)
+        return
       }
-      setLeadsLoading(false)
-    }
-    fetchLeadsRef.current = fetchLeads
-    fetchLeads()
-  }, [campaignId])
 
-  useEffect(() => {
-    if (!showLeadSection || leadGenStatus !== "generating") return
-
-    const interval = setInterval(() => {
-      fetchLeadsRef.current?.()
-    }, 3000)
-    return () => clearInterval(interval)
-  }, [campaignId, showLeadSection, leadGenStatus])
-
-  useEffect(() => {
-    if (lastFetchedCampaignId.current === campaignId) return
-    lastFetchedCampaignId.current = campaignId
-    const fetchTabsData = async () => {
-      if (isFetching.current) return
-      isFetching.current = true
-      try {
-        const res = await fetch(`/api/campaigns/${campaignId}/tabs`)
-        if (res.ok) {
-          const json = await res.json()
-          if (
-            (json.pendingCount ?? 0) === 0 &&
-            (json.sendingStats?.messagesSent ?? 0) > 0 &&
-            (campaign?.status === "active" || campaign?.status === "sending")
-          ) {
-            router.refresh()
-          }
-          setTabsData({
-            sendingStats: { messagesSent: 0, failedSends: 0, replyRate: 0, dailySent: 0, dailyLimit: 100, ...json.sendingStats },
-            replies: json.replies ?? [],
-            repliesCount: json.analytics?.replies ?? json.replies?.length ?? 0,
-            nextScheduledAt: json.nextScheduledAt ?? null,
-            currentPhase: json.currentPhase ?? "Initial Messages",
-            pendingCount: json.pendingCount ?? 0,
-            uniqueLeadsContacted: json.uniqueLeadsContacted ?? 0,
-            leadsRemaining: json.leadsRemaining ?? 0,
-          })
+      const payload = (await res.json()) as {
+        campaign?: {
+          status?: string | null
+          lead_generation_status?: string | null
+          lead_generation_stage?: string | null
+          target_search_query?: string | null
         }
-      } catch {
-        // ignore
-      } finally {
-        isFetching.current = false
+        leads?: Record<string, unknown>[]
+        queueMessages?: CampaignQueueMessageRow[]
+        queueStats?: CampaignQueueStats
+      }
+
+      if (id !== activeCampaignIdRef.current) return
+
+      const row = payload.campaign
+      const leadsData = payload.leads ?? []
+
+      if (row) {
+        if (typeof row.status === "string") {
+          setCampaignStatus(row.status)
+        }
+        const st = row.lead_generation_status as "generating" | "complete" | "failed" | undefined
+        if (st === "generating" || st === "complete" || st === "failed") {
+          setLeadGenStatus(st)
+        }
+        setLeadGenStage(
+          (row.lead_generation_stage as
+            | "searching"
+            | "enriching"
+            | "filling"
+            | "expanding"
+            | "complete"
+            | null) ?? null
+        )
+      }
+
+      setLeadsForThisCampaign(leadsData.map((raw) => normalizeLead(raw)))
+      setQueueMessages(
+        Array.isArray(payload.queueMessages) ? payload.queueMessages : []
+      )
+      const qs = payload.queueStats
+      if (
+        qs &&
+        typeof qs.sent === "number" &&
+        typeof qs.notSent === "number" &&
+        typeof qs.failed === "number"
+      ) {
+        setQueueStats(qs)
+      } else {
+        setQueueStats({ sent: 0, notSent: 0, failed: 0 })
+      }
+    } catch (e) {
+      console.error("fetchCampaignData:", e)
+    } finally {
+      if (id !== activeCampaignIdRef.current) return
+      setLeadsLoading(false)
+      if (!initialFetchCompletedRef.current) {
+        initialFetchCompletedRef.current = true
+        setIsLoading(false)
       }
     }
-    fetchTabsDataRef.current = () => { fetchTabsData() }
-    fetchTabsData()
+  }, [campaignId, campaign.target_search_query])
+
+  /** Initial load + campaign switch: reset and fetch immediately (critical for live lead count). */
+  useEffect(() => {
+    initialFetchCompletedRef.current = false
+    setIsLoading(true)
+    setLeadsLoading(true)
+    setLeadsForThisCampaign([])
+    setQueueMessages([])
+    setQueueStats({ sent: 0, notSent: 0, failed: 0 })
+    void fetchCampaignData()
+  }, [
+    campaignId,
+    initialCampaign.lead_generation_status,
+    initialCampaign.target_search_query,
+    fetchCampaignData,
+  ])
+
+  const fetchCampaignDataRef = useRef(fetchCampaignData)
+  fetchCampaignDataRef.current = fetchCampaignData
+
+  /**
+   * Poll `/api/campaign-data` every 3s so Queue tab, stats, and lead rows update without a full page refresh.
+   * Initial fetch runs in the campaign-switch effect above; this only schedules repeats and clears on unmount.
+   */
+  useEffect(() => {
+    if (!campaignId) return
+    const interval = setInterval(() => {
+      void fetchCampaignDataRef.current()
+    }, CAMPAIGN_DATA_POLL_MS)
+    return () => clearInterval(interval)
   }, [campaignId])
 
-  useEffect(() => {
-    if (status !== "running" && campaign?.status !== "active" && campaign?.status !== "sending") return
-    const interval = setInterval(() => {
-      fetchTabsDataRef.current?.()
-    }, 3000)
-    return () => clearInterval(interval)
-  }, [status, campaign?.status])
-
+  /** Refresh queue/stats when campaign_messages change (sends complete in background). */
   useEffect(() => {
     if (!campaignId) return
 
     const channel = supabase
-      .channel(`leads-${campaignId}`)
+      .channel(`campaign-messages-${campaignId}`)
       .on(
         "postgres_changes",
         {
-          event: "INSERT",
+          event: "*",
           schema: "public",
-          table: "leads",
+          table: "campaign_messages",
           filter: `campaign_id=eq.${campaignId}`,
         },
-        (payload) => {
-          console.log("REALTIME INSERT:", payload.new)
-          const raw = payload.new as Record<string, unknown>
-          const newLead = normalizeLead(raw)
-          setLeadsForThisCampaign((prev) => {
-            const exists = prev.find((l) => l.id === newLead.id)
-            if (exists) return prev
-            return [...prev, newLead]
-          })
-          setTick((t) => t + 1)
-        }
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "leads",
-          filter: `campaign_id=eq.${campaignId}`,
-        },
-        (payload) => {
-          const updated = payload.new as Record<string, unknown>
-          setLeadsForThisCampaign((prev) => {
-            const idx = prev.findIndex((l) => l.id === updated.id)
-            if (idx >= 0) {
-              return prev.map((l) => {
-                if (l.id !== updated.id) return l
-                return normalizeLead({ ...l, ...updated })
-              })
-            }
-            return [...prev, normalizeLead(updated)]
-          })
-          setTick((t) => t + 1)
+        () => {
+          void fetchCampaignDataRef.current()
         }
       )
       .subscribe()
 
     return () => {
-      supabase.removeChannel(channel)
+      void supabase.removeChannel(channel)
+    }
+  }, [campaignId])
+
+  /** Realtime: refetch when leads rows change (insert/update/delete) so stats match DB after scrape or edits. */
+  useEffect(() => {
+    if (!campaignId) return
+
+    const refetch = () => {
+      void fetchCampaignDataRef.current()
+    }
+
+    const ch = supabase
+      .channel(`campaign-leads-${campaignId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "leads",
+          filter: `campaign_id=eq.${campaignId}`,
+        },
+        refetch
+      )
+      .subscribe()
+
+    const audId = campaign.audience_id
+    let ch2: ReturnType<typeof supabase.channel> | null = null
+    if (audId) {
+      ch2 = supabase
+        .channel(`campaign-leads-aud-${campaignId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "leads",
+            filter: `audience_id=eq.${audId}`,
+          },
+          refetch
+        )
+        .subscribe()
+    }
+
+    return () => {
+      void supabase.removeChannel(ch)
+      if (ch2) void supabase.removeChannel(ch2)
+    }
+  }, [campaignId, campaign.audience_id])
+
+  /** Realtime: mirror status/stage locally; one refetch when lead gen finishes (no per-tick spam). */
+  useEffect(() => {
+    if (!campaignId) return
+
+    const channel = supabase
+      .channel(`campaign-row-${campaignId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "campaigns",
+          filter: `id=eq.${campaignId}`,
+        },
+        (payload) => {
+          const row = payload.new as {
+            status?: string
+            lead_generation_status?: string
+            lead_generation_stage?: string | null
+          }
+          if (typeof row.status === "string") setCampaignStatus(row.status)
+          const lg = row.lead_generation_status
+          if (lg === "generating" || lg === "complete" || lg === "failed") {
+            setLeadGenStatus(lg as "generating" | "complete" | "failed")
+          }
+          if (row.lead_generation_stage !== undefined) {
+            setLeadGenStage(
+              row.lead_generation_stage as
+                | "searching"
+                | "enriching"
+                | "filling"
+                | "expanding"
+                | "complete"
+                | null
+            )
+          }
+          if (lg === "complete" || lg === "failed") {
+            void fetchCampaignDataRef.current()
+          }
+        }
+      )
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(channel)
     }
   }, [campaignId])
 
@@ -241,52 +405,44 @@ export function CampaignDetailContent({ campaign, leadCount }: Props) {
     )
   }, [campaign.lead_generation_status])
 
-  useEffect(() => {
-    const s = campaign.status ?? "draft"
-    setStatus((s === "active" || s === "sending" ? "running" : s === "paused" || s === "stopped" || s === "completed" ? "paused" : "draft") as "draft" | "running" | "paused")
-  }, [campaign.status])
-
-  const handleStart = async () => {
-    if (status === "running") return
-    const prevStatus = status
-    console.log("Start button clicked, campaign:", campaign.id)
-    setIsLoading(true)
-    setStatus("running")
+  const handleStartSending = async () => {
+    if (startSendingUi !== "idle") return
+    setStartSendingUi("starting")
     try {
-      const res = await fetch("/api/start-campaign", {
+      const res = await fetch(`/api/campaigns/${campaign.id}/start-sending`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ campaignId: campaign.id }),
       })
-      const data = await res.json()
-      console.log("Start campaign response:", data)
-      if (!res.ok) throw new Error(data.error ?? "Failed to start")
+
+      await res.json()
+
+      if (!res.ok) {
+        setStartSendingUi("idle")
+        return
+      }
+
+      setStartSendingUi("running")
+      void fetchCampaignData()
       router.refresh()
-      fetchTabsDataRef.current?.()
     } catch (err) {
-      console.error("Error starting campaign:", err)
-      setStatus(prevStatus)
-    } finally {
-      setIsLoading(false)
+      console.error(err)
+      setStartSendingUi("idle")
     }
   }
 
-  const handleStop = async () => {
-    console.log("Stop button clicked, campaign:", campaign.id)
-    setStatus("paused")
+  const handleStopCampaign = async () => {
     try {
-      const res = await fetch("/api/stop-campaign", {
+      setIsStopping(true)
+      const res = await fetch(`/api/campaigns/${campaign.id}/stop-campaign`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ campaignId: campaign.id }),
       })
-      const data = await res.json()
-      console.log("Stop campaign response:", data)
-      if (!res.ok) throw new Error(data.error ?? "Failed to stop")
+      if (!res.ok) throw new Error((await res.json()).error ?? "Failed to stop")
+      setCampaignStatus("paused")
+      void fetchCampaignData()
       router.refresh()
-      fetchTabsDataRef.current?.()
     } catch (err) {
       console.error("Error stopping campaign:", err)
+    } finally {
+      setIsStopping(false)
     }
   }
 
@@ -299,9 +455,7 @@ export function CampaignDetailContent({ campaign, leadCount }: Props) {
           </h2>
           <CampaignDetailsEditor
             campaignId={campaign.id}
-            channel={campaign.channel}
             messageTemplate={campaign.message_template ?? null}
-            followUpSchedule={campaign.follow_up_schedule ?? null}
             subject={campaign.subject ?? null}
             targetAudience={targetLabel}
             audienceNiche={campaign.audiences?.niche ?? campaign.audiences?.name ?? campaign.target_search_query ?? campaign.target_audience ?? undefined}
@@ -317,10 +471,59 @@ export function CampaignDetailContent({ campaign, leadCount }: Props) {
     )
   }
 
-  const leads = leadsForThisCampaign ?? []
-  const emailsFound = leads.filter((l) => l.email).length
+  const targetCap = Math.min(
+    campaign.audiences?.target_leads ?? MAX_LEADS_PER_CAMPAIGN,
+    MAX_LEADS_PER_CAMPAIGN
+  )
+  const safeLeads = Array.isArray(leadsForThisCampaign) ? leadsForThisCampaign : []
+  const uniqueLeads = safeLeads.filter((lead, index, self) => {
+    const key = contactKeyForCampaignLead(lead)
+    return index === self.findIndex((l) => contactKeyForCampaignLead(l) === key)
+  })
+  /** Deduped cap for send-completion checks; headline stats use DB counts below. */
+  const cappedLeads = uniqueLeads.slice(0, MAX_LEADS_PER_CAMPAIGN)
+
+  const statsTotalLeads = safeLeads.length
+  const statsEmailsFound = safeLeads.filter(leadHasNonEmptyEmail).length
+  const leadsFound = statsTotalLeads
+
+  const scrapeProgressPercent =
+    targetCap > 0 ? Math.min((leadsFound / targetCap) * 100, 100) : 0
+  const emailsFound = statsEmailsFound
   const isScraping = !!(showLeadSection && leadGenStatus === "generating")
-  const isReady = leads.length > 0 && emailsFound > 0 && !isScraping
+  const missingEmailCount = Math.max(0, statsTotalLeads - statsEmailsFound)
+  const isEnrichingUi =
+    isScraping &&
+    (leadGenStage === "enriching" ||
+      (statsEmailsFound >= targetCap && missingEmailCount > 0))
+  const emailRate =
+    statsTotalLeads > 0
+      ? Math.round((statsEmailsFound / statsTotalLeads) * 100)
+      : 0
+  const isReady = statsTotalLeads > 0 && statsEmailsFound > 0 && !isScraping
+  const effectiveStatus = campaignStatus ?? campaign.status ?? "draft"
+  const leadsWithEmail = cappedLeads.filter(leadHasNonEmptyEmail)
+  const allEmailLeadsSent =
+    leadsWithEmail.length > 0 &&
+    leadsWithEmail.every((l) => l.status === "sent")
+  const isCampaignCompleted =
+    effectiveStatus === "completed" || allEmailLeadsSent
+  const campaignIsLive =
+    !isCampaignCompleted &&
+    (effectiveStatus === "active" || effectiveStatus === "sending")
+  const canStartOrResume =
+    !isCampaignCompleted &&
+    (isReady ||
+      effectiveStatus === "paused" ||
+      effectiveStatus === "stopped")
+  const status =
+    isCampaignCompleted
+      ? "completed"
+      : campaignIsLive
+        ? "running"
+        : effectiveStatus === "paused" || effectiveStatus === "stopped"
+          ? "paused"
+          : "draft"
 
   return (
     <div className="space-y-6">
@@ -338,167 +541,188 @@ export function CampaignDetailContent({ campaign, leadCount }: Props) {
         />
       )}
 
-      {/* Stat cards + Progress: ONE source = leadsForThisCampaign (updates live via Realtime) */}
-      {(() => {
-        const targetLeads = campaign.audiences?.target_leads ?? 200
-        const leads = leadsForThisCampaign
-        const displayLeads = Math.min(leads.length, targetLeads)
-        const emailCount = leads.filter((l) => l.email).length
-        const phoneCount = leads.filter((l) => l.phone).length
-        const emailRate = leads.length ? Math.round((emailCount / leads.length) * 100) : 0
-        const phoneRate = leads.length ? Math.round((phoneCount / leads.length) * 100) : 0
-        const isScraping = showLeadSection && leadGenStatus === "generating"
-        const scrapingStatus = isScraping ? "Scraping contact info..." : "Scraping complete"
-        return (
-      <>
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="rounded-xl border border-zinc-700/60 bg-zinc-800/40 p-5">
-          <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-1">Target Leads</p>
-          <p className="text-xl font-semibold text-white tabular-nums">
-            {targetLeads}
-          </p>
+      {/* Stat cards + progress — hidden until first fetch (no 0 flash) */}
+      {isLoading ? (
+        <CampaignStatsLoadingSkeleton />
+      ) : (
+        <>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="rounded-xl border border-zinc-700/60 bg-zinc-800/40 p-5">
+            <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-1">Target leads</p>
+            <p className="text-xl font-semibold text-white tabular-nums">
+              {targetCap}
+            </p>
+          </div>
+          <div className="rounded-xl border border-zinc-700/60 bg-zinc-800/40 p-5">
+            <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-1">
+              Leads found
+            </p>
+            <p className="text-xl font-semibold text-white tabular-nums">
+              {leadsFound}
+              <span className="text-base font-normal text-zinc-500"> / {targetCap}</span>
+            </p>
+          </div>
+          <div className="rounded-xl border border-zinc-700/60 bg-zinc-800/40 p-5">
+            <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-1">Status</p>
+            <CampaignStatusBadge
+              status={
+                status === "running"
+                  ? "active"
+                  : status === "completed"
+                    ? "completed"
+                    : status
+              }
+            />
+          </div>
         </div>
-        <div className="rounded-xl border border-zinc-700/60 bg-zinc-800/40 p-5">
-          <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-1">Leads Found</p>
-          <p className="text-xl font-semibold text-white tabular-nums">
-            {displayLeads}
-          </p>
-        </div>
-        <div className="rounded-xl border border-zinc-700/60 bg-zinc-800/40 p-5">
-          <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-1">Status</p>
-          <CampaignStatusBadge status={status === "running" ? "active" : status} />
-        </div>
-      </div>
 
-      {/* Progress bar: same leads array as Leads tab (displayLeads prevents overflow) */}
-      <ScrapingProgressBar
-        current={displayLeads}
-        target={targetLeads}
-        statusMessage={
-          showLeadSection && leadGenStatus === "generating"
-            ? leadGenStage === "enriching"
-              ? "Finding lead information..."
-              : leads.length === 0
-                ? "Finding businesses..."
-                : null
-            : null
-        }
-      />
-
-      {/* Email + phone metrics from existing leads (updates live) */}
-      <div className="flex flex-wrap gap-4 mt-4">
-        <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl px-4 py-3 min-w-[140px]">
-          <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-0.5">Emails Found</p>
-          <p className="text-lg font-semibold text-white tabular-nums">
-            {emailCount}
-            {leads.length > 0 && (
-              <span className="ml-1.5 text-sm font-normal text-zinc-400">({emailRate}%)</span>
-            )}
-          </p>
-          <p className={`text-xs mt-1 ${isScraping ? "text-yellow-400" : "text-green-400"}`}>
-            {scrapingStatus}
-          </p>
-        </div>
-        <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl px-4 py-3 min-w-[140px]">
-          <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-0.5">Phone Numbers</p>
-          <p className="text-lg font-semibold text-white tabular-nums">
-            {phoneCount}
-            {leads.length > 0 && (
-              <span className="ml-1.5 text-sm font-normal text-zinc-400">({phoneRate}%)</span>
-            )}
-          </p>
-          <p className={`text-xs mt-1 ${isScraping ? "text-yellow-400" : "text-green-400"}`}>
-            {scrapingStatus}
-          </p>
-        </div>
-      </div>
-      </>
-        )
-      })()}
-
-      {/* Campaign Activity - when active or paused */}
-      {showActivity && tabsData && (
-        <CampaignActivity
-          status={
-            status === "running" && (tabsData.pendingCount ?? 0) === 0
-              ? "completed"
-              : status === "running"
-                ? "active"
-                : status
+        <ScrapingProgressBar
+          current={Math.min(leadsFound, targetCap)}
+          target={targetCap}
+          progressPercent={scrapeProgressPercent}
+          statusMessage={
+            showLeadSection && leadGenStatus === "generating"
+              ? leadsFound < targetCap
+                ? leadGenStage === "expanding"
+                  ? "Expanding search to nearby areas..."
+                  : leadsFound === 0
+                    ? "Finding businesses and leads..."
+                    : `Found ${leadsFound} leads...`
+                : missingEmailCount > 0
+                  ? "Finding email addresses for remaining leads..."
+                  : "Scraping complete"
+              : null
           }
-          currentPhase={
-            status === "running"
-              ? (tabsData.pendingCount ?? 0) === 0
-                ? "Completed"
-                : "Sending..."
-              : status === "paused"
-                ? "Paused"
-                : campaign.status === "completed"
-                  ? "Completed"
-                  : tabsData.currentPhase
-          }
-          messagesSent={tabsData.sendingStats.messagesSent}
-          repliesCount={tabsData.repliesCount}
-          nextScheduledAt={tabsData.nextScheduledAt}
-          leadsRemaining={tabsData.leadsRemaining}
         />
-      )}
 
-      {/* Status text */}
-      {status === "running" && (
-        <p className="text-sm text-green-400">
-          {(tabsData?.pendingCount ?? 0) === 0 ? "Completed" : "Sending..."}
-        </p>
+        <div className="mt-4">
+          <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl px-4 py-3 max-w-md">
+            <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-0.5">
+              Email coverage
+            </p>
+            <p className="text-lg font-semibold text-white tabular-nums">
+              Emails found: {emailsFound}
+              <span className="ml-1.5 text-sm font-normal text-zinc-400">
+                ({statsTotalLeads > 0 ? emailRate : 0}%)
+              </span>
+            </p>
+            <p
+              className={`text-xs mt-1 ${
+                isEnrichingUi ? "text-yellow-400" : isScraping ? "text-zinc-400" : "text-green-400"
+              }`}
+            >
+              {isEnrichingUi
+                ? "Scraping emails…"
+                : isScraping
+                  ? leadGenStage === "expanding"
+                    ? "Expanding to nearby areas…"
+                    : statsEmailsFound < targetCap
+                      ? "Finding businesses and emails…"
+                      : "Scraping complete"
+                  : "Scraping complete"}
+            </p>
+          </div>
+        </div>
+
+      {/* Campaign Activity */}
+      <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md p-6 shadow-lg">
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-lg font-semibold text-white">Campaign Activity</h2>
+          <span
+            className={`text-sm px-3 py-1 rounded-full ${
+              isCampaignCompleted
+                ? "bg-zinc-600/40 text-zinc-300"
+                : campaignIsLive
+                  ? "bg-green-500/20 text-green-400"
+                  : "bg-zinc-600/40 text-zinc-400"
+            }`}
+          >
+            {isCampaignCompleted ? "Completed" : campaignIsLive ? "Active" : "Idle"}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+          <div className="bg-black/30 rounded-xl p-4">
+            <div className="text-xs text-gray-400">Sent</div>
+            <div className="text-2xl font-bold text-white">{queueStats.sent}</div>
+          </div>
+
+          <div className="bg-black/30 rounded-xl p-4">
+            <div className="text-xs text-gray-400">Leads Total</div>
+            <div className="text-2xl font-bold text-white">{statsTotalLeads}</div>
+          </div>
+
+          <div className="bg-black/30 rounded-xl p-4">
+            <div className="text-xs text-gray-400">Not Sent</div>
+            <div className="text-2xl font-bold text-yellow-400">
+              {queueStats.notSent}
+            </div>
+          </div>
+
+          <div className="bg-black/30 rounded-xl p-4">
+            <div className="text-xs text-gray-400">Failed</div>
+            <div className="text-2xl font-bold text-red-400">{queueStats.failed}</div>
+          </div>
+
+          <div className="bg-black/30 rounded-xl p-4">
+            <div className="text-xs text-gray-400">Status</div>
+            <div
+              className={`text-2xl font-bold ${
+                isCampaignCompleted ? "text-zinc-300" : queueStats.sent > 0 ? "text-green-400" : "text-zinc-400"
+              }`}
+            >
+              {isCampaignCompleted ? "Completed" : queueStats.sent > 0 ? "Sending" : "Ready"}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {isCampaignCompleted && (
+        <p className="text-sm text-zinc-300">All emails sent</p>
       )}
-      {status === "paused" && <p className="text-sm text-yellow-400">Paused — click Resume to continue</p>}
-      {status === "draft" && <p className="text-sm text-zinc-500">Ready to start</p>}
-      {tabsData?.sendingStats?.dailyLimit != null && (
-        <p className="text-sm text-zinc-400">
-          You&apos;ve sent {tabsData.sendingStats.dailySent ?? 0} / {tabsData.sendingStats.dailyLimit} emails today
-        </p>
+      {!isCampaignCompleted && queueStats.sent > 0 && (
+        <p className="text-sm text-green-400">Sent {queueStats.sent} emails</p>
+      )}
+      {startSendingUi === "starting" && (
+        <p className="text-sm text-green-400">Starting…</p>
+      )}
+      {startSendingUi === "running" && (
+        <p className="text-sm text-green-400">Running…</p>
       )}
 
       {/* Action buttons */}
       <div className="flex flex-wrap gap-2 items-center">
-        {status === "running" && (tabsData?.pendingCount ?? 1) > 0 ? (
+        {campaignIsLive && (
           <button
             type="button"
-            onClick={handleStop}
-            disabled={isLoading}
-            className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded font-medium text-sm transition disabled:opacity-50"
+            onClick={handleStopCampaign}
+            disabled={isStopping}
+            className="bg-red-600 px-4 py-2 rounded font-medium text-sm text-white hover:bg-red-500 disabled:opacity-50 disabled:cursor-not-allowed transition"
           >
-            Stop Sending
+            {isStopping ? "Stopping…" : "Stop Campaign"}
           </button>
-        ) : status === "running" && tabsData && (tabsData.pendingCount ?? 0) === 0 ? (
-          <p className="text-sm text-zinc-400">Campaign completed</p>
-        ) : (
-          <>
-            <button
-              type="button"
-              onClick={handleStart}
-              disabled={isLoading || (!isReady && status === "draft")}
-              className={`px-4 py-2 rounded font-medium text-sm transition ${
-                isReady || status === "paused"
-                  ? "bg-green-500 hover:bg-green-600 text-white disabled:opacity-50"
-                  : "bg-zinc-600 text-zinc-400 cursor-not-allowed opacity-50"
-              }`}
-            >
-              {isLoading
-                ? status === "paused"
-                  ? "Resuming…"
-                  : "Starting…"
-                : status === "paused"
-                  ? "Resume Campaign"
-                  : "Start Sending Messages"}
-            </button>
-            {!isReady && status === "draft" && (
-              <p className="text-sm text-yellow-400 mt-1 ml-1">
-                Finish scraping emails before sending
-              </p>
-            )}
-          </>
+        )}
+        {!campaignIsLive && !isCampaignCompleted && (
+          <button
+            type="button"
+            onClick={handleStartSending}
+            disabled={!canStartOrResume || startSendingUi !== "idle"}
+            aria-busy={startSendingUi !== "idle"}
+            className="bg-green-500 px-4 py-2 rounded font-medium text-sm text-white hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none transition"
+          >
+            {startSendingUi === "starting"
+              ? "Starting…"
+              : startSendingUi === "running"
+                ? "Running…"
+                : "Start Sending Messages"}
+          </button>
+        )}
+        {!canStartOrResume && startSendingUi === "idle" && !isCampaignCompleted && (
+          <p className="text-sm text-yellow-400">Finish scraping emails before sending</p>
         )}
       </div>
+        </>
+      )}
 
       {/* Tabs */}
       <div className="rounded-xl border border-zinc-700/60 bg-zinc-900/30 overflow-hidden">
@@ -538,39 +762,37 @@ export function CampaignDetailContent({ campaign, leadCount }: Props) {
               campaignId={campaign.id}
               leads={leadsForThisCampaign}
               loading={leadsLoading}
-              targetLeads={campaign.audiences?.target_leads ?? 200}
               isGenerating={!!(showLeadSection && leadGenStatus === "generating")}
               onLeadAdded={(lead) => setLeadsForThisCampaign((prev) => [...prev, lead])}
               onLeadDeleted={(leadId) => setLeadsForThisCampaign((prev) => prev.filter((l) => l.id !== leadId))}
             />
           </div>
           <div className={activeTab === "stats" ? "block" : "hidden"}>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div className="rounded-xl border border-zinc-700/60 bg-zinc-800/40 p-5">
-                <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-1">Messages Sent</p>
-                <p className="text-2xl font-semibold text-white tabular-nums">
-                  {tabsData?.sendingStats.messagesSent ?? 0}
-                </p>
+            {isLoading ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 animate-pulse">
+                <div className="rounded-xl border border-zinc-700/40 bg-zinc-800/30 p-5 h-28" />
+                <div className="rounded-xl border border-zinc-700/40 bg-zinc-800/30 p-5 h-28" />
               </div>
-              <div className="rounded-xl border border-zinc-700/60 bg-zinc-800/40 p-5">
-                <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-1">Failed Sends</p>
-                <p className="text-2xl font-semibold text-white tabular-nums">
-                  {tabsData?.sendingStats.failedSends ?? 0}
-                </p>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="rounded-xl border border-zinc-700/60 bg-zinc-800/40 p-5">
+                  <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-1">Sent</p>
+                  <p className="text-2xl font-semibold text-white tabular-nums">
+                    {queueStats.sent}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-zinc-700/60 bg-zinc-800/40 p-5">
+                  <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-1">Reply Rate</p>
+                  <p className="text-2xl font-semibold text-white tabular-nums">0%</p>
+                </div>
               </div>
-              <div className="rounded-xl border border-zinc-700/60 bg-zinc-800/40 p-5">
-                <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-1">Reply Rate</p>
-                <p className="text-2xl font-semibold text-white tabular-nums">
-                  {tabsData?.sendingStats.replyRate ?? 0}%
-                </p>
-              </div>
-            </div>
+            )}
           </div>
           <div className={activeTab === "replies" ? "block" : "hidden"}>
             <CampaignRepliesTab
               campaignId={campaign.id}
-              replies={tabsData?.replies ?? []}
-              onUpdate={() => fetchTabsDataRef.current?.()}
+              replies={[]}
+              onUpdate={() => {}}
             />
           </div>
           <div className={activeTab === "notes" ? "block" : "hidden"}>
@@ -578,9 +800,10 @@ export function CampaignDetailContent({ campaign, leadCount }: Props) {
           </div>
           <div className={activeTab === "queue" ? "block" : "hidden"}>
             <CampaignQueueTab
-              campaignId={campaign.id}
-              activeTab={activeTab}
-              campaignStatus={campaign.status ?? undefined}
+              queueMessages={queueMessages}
+              queueStats={queueStats}
+              loading={leadsLoading}
+              campaignStatus={effectiveStatus}
             />
           </div>
         </div>

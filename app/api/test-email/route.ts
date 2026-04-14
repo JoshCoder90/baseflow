@@ -1,9 +1,13 @@
 import { NextResponse } from "next/server"
 import { Resend } from "resend"
+import { rateLimitResponse } from "@/lib/rateLimit"
 
 const resend = new Resend(process.env.RESEND_API_KEY)
 
-export async function GET() {
+export async function GET(req: Request) {
+  const _rl = rateLimitResponse(req)
+  if (_rl) return _rl
+
   console.log("Sending test email via Resend")
 
   if (!process.env.RESEND_API_KEY) {

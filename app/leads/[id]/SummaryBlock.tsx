@@ -3,15 +3,11 @@
 import { useState, useEffect } from "react"
 
 type InsightData = {
-  leadScore: number
-  intent: string
   recommendedAction: string
   insights: string[]
 }
 
 const defaultData: InsightData = {
-  leadScore: 0,
-  intent: "—",
   recommendedAction: "—",
   insights: [],
 }
@@ -23,7 +19,10 @@ export function SummaryBlock({ leadId }: Props) {
   const [loadingSummary, setLoadingSummary] = useState(true)
 
   useEffect(() => {
+    let cancelled = false
+
     const generateSummary = async () => {
+      setLoadingSummary(true)
       try {
         const res = await fetch("/api/generate-summary", {
           method: "POST",
@@ -32,25 +31,36 @@ export function SummaryBlock({ leadId }: Props) {
         })
 
         const json = await res.json()
-        if (json.leadScore != null && Array.isArray(json.insights)) {
+        if (cancelled) return
+        if (Array.isArray(json.insights)) {
           setData({
-            leadScore: Number(json.leadScore) ?? 0,
-            intent: json.intent ?? "—",
-            recommendedAction: json.recommendedAction ?? "—",
+            recommendedAction:
+              typeof json.recommendedAction === "string" ? json.recommendedAction : "—",
             insights: json.insights ?? [],
           })
         }
       } catch (err) {
         console.error("Summary error:", err)
       } finally {
-        setLoadingSummary(false)
+        if (!cancelled) setLoadingSummary(false)
       }
     }
 
     generateSummary()
+
+    const onMessagesChanged = (e: Event) => {
+      const ce = e as CustomEvent<{ leadId?: string }>
+      if (ce.detail?.leadId !== leadId) return
+      void generateSummary()
+    }
+    window.addEventListener("bf-lead-messages-changed", onMessagesChanged)
+    return () => {
+      cancelled = true
+      window.removeEventListener("bf-lead-messages-changed", onMessagesChanged)
+    }
   }, [leadId])
 
-  const { leadScore, intent, recommendedAction, insights } = data
+  const { recommendedAction, insights } = data
 
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6 sm:p-8">
@@ -68,26 +78,16 @@ export function SummaryBlock({ leadId }: Props) {
             ) : (
               insights.map((item, i) => (
                 <div key={i} className="flex items-center gap-2 text-sm text-gray-200">
-                  <span className="text-green-500">●</span>
+                  <span className="text-zinc-500">•</span>
                   <span>{item}</span>
                 </div>
               ))
             )}
           </div>
 
-          <div className="border-t border-neutral-800 pt-4 flex gap-8 text-sm">
-            <div>
-              <span className="text-gray-400">Lead Score</span>
-              <div className="text-white font-semibold">{leadScore}</div>
-            </div>
-            <div>
-              <span className="text-gray-400">Intent</span>
-              <div className="text-white font-semibold">{intent}</div>
-            </div>
-            <div>
-              <span className="text-gray-400">Recommended</span>
-              <div className="text-white font-semibold">{recommendedAction}</div>
-            </div>
+          <div className="border-t border-neutral-800 pt-4 text-sm">
+            <span className="text-gray-400">Recommended</span>
+            <div className="text-white font-semibold mt-1">{recommendedAction}</div>
           </div>
         </div>
       )}

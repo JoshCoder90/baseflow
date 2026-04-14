@@ -1,7 +1,16 @@
+import { startGmailSyncLoop } from "@/lib/gmail-sync-loop";
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { SessionProvider } from "@/app/providers/SessionProvider";
+import { GmailReconnectProvider } from "@/app/providers/GmailReconnectProvider";
 import "./globals.css";
+
+let started = false;
+if (!started) {
+  started = true;
+  console.log("🚀 AUTO STARTING GMAIL SYNC LOOP...");
+  startGmailSyncLoop();
+}
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -24,12 +33,16 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" className="h-full">
       <body
         suppressHydrationWarning
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        className={`${geistSans.variable} ${geistMono.variable} flex h-full flex-col overflow-hidden antialiased`}
       >
-        <SessionProvider>{children}</SessionProvider>
+        <SessionProvider>
+          <GmailReconnectProvider>
+            <div className="flex min-h-0 flex-1 flex-col">{children}</div>
+          </GmailReconnectProvider>
+        </SessionProvider>
       </body>
     </html>
   );

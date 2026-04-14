@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from "next/server"
 import { createClient } from "@supabase/supabase-js"
 import { createClient as createServerClient } from "@/lib/supabase/server"
 import { personalizeMessage } from "@/lib/lead-personalization"
+import { isValidEmail } from "@/lib/campaign-message-insert-email"
+import { isEmailAllowedForCampaignQueue } from "@/lib/email-queue-validation"
+import { OUTBOUND_EMAIL_CHANNEL } from "@/lib/outbound-channel"
+import { validateUuid } from "@/lib/api-input-validation"
+import { rateLimitResponse } from "@/lib/rateLimit"
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY || ""
@@ -10,14 +15,19 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  try {
-    const { id: campaignId } = await params
-    const body = await req.json().catch(() => ({}))
-    const leadId = body?.leadId
+  const _rl = rateLimitResponse(req)
+  if (_rl) return _rl
 
-    if (!campaignId || !leadId) {
-      return NextResponse.json({ error: "campaignId and leadId required" }, { status: 400 })
-    }
+  try {
+    const { id: campaignIdRaw } = await params
+    const vCamp = validateUuid(campaignIdRaw, "campaign id")
+    if (!vCamp.ok) return vCamp.response
+    const campaignId = vCamp.value
+
+    const body = await req.json().catch(() => ({}))
+    const vl = validateUuid(body?.leadId, "leadId")
+    if (!vl.ok) return vl.response
+    const leadId = vl.value
 
     if (!supabaseServiceKey) {
       return NextResponse.json({ error: "Server configuration error" }, { status: 500 })
@@ -33,7 +43,7 @@ export async function POST(
 
     const { data: campaign, error: campaignError } = await supabase
       .from("campaigns")
-      .select("id, user_id, message_template, subject, follow_up_schedule")
+      .select("id, user_id, message_template, subject")
       .eq("id", campaignId)
       .single()
 
@@ -56,7 +66,32 @@ export async function POST(
       return NextResponse.json({ error: "Lead has no email" })
     }
 
-    if (lead.status === "messaged") {
+    if (!isValidEmail(lead.email)) {
+      console.log("Filtered invalid email:", lead.email)
+      console.log("Filtered emails:", 1)
+      return NextResponse.json(
+        { error: "Invalid email address", rejected: true },
+        { status: 400 }
+      )
+    }
+
+    if (!isEmailAllowedForCampaignQueue(lead.email)) {
+      console.log(`Rejected invalid email before queue: ${lead.email}`)
+      await supabase
+        .from("leads")
+        .update({ status: "invalid_email" })
+        .eq("id", leadId)
+      return NextResponse.json(
+        { error: "Invalid email address", rejected: true },
+        { status: 400 }
+      )
+    }
+
+    if (lead.status === "invalid_email") {
+      await supabase.from("leads").update({ status: "cold" }).eq("id", leadId)
+    }
+
+    if (lead.status === "sent") {
       return NextResponse.json({ error: "Lead already messaged" })
     }
 
@@ -66,30 +101,8 @@ export async function POST(
       .eq("lead_id", leadId)
       .eq("campaign_id", campaignId)
 
-    type FollowUpStep = { day: number; type: string; template?: string }
-    function parseFollowUpSchedule(raw: string | null | undefined): FollowUpStep[] {
-      if (!raw || typeof raw !== "string") return []
-      try {
-        const parsed = JSON.parse(raw)
-        return Array.isArray(parsed) ? parsed : []
-      } catch {
-        return []
-      }
-    }
-    const followUps = parseFollowUpSchedule(campaign.follow_up_schedule)
     const messageTemplate = campaign.message_template?.trim() || "Hey {{first_name}}, I wanted to reach out. Would love to connect!"
-
-    type QueueStep = { delayDays: number; step: number; template: string }
-    const steps: QueueStep[] = [{ delayDays: 0, step: 1, template: messageTemplate }]
-    for (let j = 0; j < followUps.length; j++) {
-      const fu = followUps[j]
-      const delayDays = fu.day >= 1 ? fu.day : [2, 4, 7][j] ?? 7
-      steps.push({
-        delayDays,
-        step: j + 2,
-        template: (fu.template?.trim() || messageTemplate) as string,
-      })
-    }
+    const steps = [{ delayDays: 0, step: 1, template: messageTemplate }]
 
     const existingByStep = new Map(
       (existingMessages ?? []).map((m) => [m.step_number, { id: m.id, status: m.status }])
@@ -120,7 +133,7 @@ export async function POST(
         lead_id: leadId,
         campaign_id: campaignId,
         step_number: step,
-        channel: "email",
+        channel: OUTBOUND_EMAIL_CHANNEL,
         message_body: messageBody,
         send_at: sendAt,
         status: "pending",

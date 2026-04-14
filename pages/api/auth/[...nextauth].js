@@ -9,7 +9,7 @@ export const authOptions = {
       authorization: {
         params: {
           scope:
-            "openid email profile https://www.googleapis.com/auth/gmail.send",
+            "openid email profile https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly",
           access_type: "offline",
           prompt: "consent",
         },
@@ -26,6 +26,9 @@ export const authOptions = {
         console.log("Google OAuth hit:", email)
 
         try {
+          console.log("OAuth tokens received")
+          console.log("Refresh token present:", !!refresh_token)
+
           const { createClient } = await import("@supabase/supabase-js")
           const supabase = createClient(
             process.env.NEXT_PUBLIC_SUPABASE_URL,
@@ -35,12 +38,23 @@ export const authOptions = {
           const { data: { user: supabaseUser } } = await supabase.auth.admin.getUserByEmail(email)
 
           if (supabaseUser && email && access_token) {
+            const { data: existingRow } = await supabase
+              .from("gmail_connections")
+              .select("refresh_token")
+              .eq("user_id", supabaseUser.id)
+              .maybeSingle()
+
+            const mergedRefresh =
+              refresh_token && String(refresh_token).length > 0
+                ? refresh_token
+                : (existingRow?.refresh_token ?? null)
+
             const { error } = await supabase
               .from("gmail_connections")
               .upsert({
                 user_id: supabaseUser.id,
                 access_token,
-                refresh_token: refresh_token ?? null,
+                refresh_token: mergedRefresh,
                 gmail_email: email,
                 connected: true,
                 updated_at: new Date().toISOString(),
@@ -63,7 +77,9 @@ export const authOptions = {
     async jwt({ token, account }) {
       if (account) {
         token.accessToken = account.access_token
-        token.refreshToken = account.refresh_token
+        if (account.refresh_token) {
+          token.refreshToken = account.refresh_token
+        }
       }
       return token
     },

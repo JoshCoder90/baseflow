@@ -36,7 +36,7 @@ export default async function DashboardLayout({
   })
 
   return (
-    <div className="h-screen min-h-0 flex bg-gradient-to-b from-zinc-950 via-zinc-900 to-zinc-950 text-white">
+    <div className="flex h-full min-h-0 overflow-hidden bg-gradient-to-b from-zinc-950 via-zinc-900 to-zinc-950 text-white">
       <aside className="w-full lg:w-64 flex-shrink-0 bg-zinc-900/98 border-b lg:border-b-0 lg:border-r border-zinc-800/80 flex flex-row lg:flex-col">
         <div className="p-4 lg:p-6 border-b-0 lg:border-b border-r lg:border-r-0 border-zinc-800/80 flex items-center lg:block">
           <Link href="/" className="text-xl font-bold tracking-tight text-white hover:opacity-90">
@@ -54,9 +54,9 @@ export default async function DashboardLayout({
         </div>
       </aside>
 
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <main className="flex-1 min-h-0 overflow-y-auto px-8 py-8">
-          <div className="w-full">
+      <div className="flex min-h-0 flex-1 flex-col min-w-0 overflow-hidden">
+        <main className="flex min-h-0 flex-1 flex-col overflow-hidden px-8 py-8">
+          <div className="flex min-h-0 w-full flex-1 flex-col overflow-y-auto overflow-x-hidden">
             {children}
           </div>
         </main>

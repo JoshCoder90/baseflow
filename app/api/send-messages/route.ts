@@ -1,11 +1,18 @@
 import { NextRequest, NextResponse } from "next/server"
-import { processQueue } from "@/lib/queue-worker"
+import { processQueue } from "@/lib/process-queue-batch"
+import { rateLimitResponse } from "@/lib/rateLimit"
 
 export async function GET(req: NextRequest) {
+  const _rl = rateLimitResponse(req)
+  if (_rl) return _rl
+
   return runQueueHandler(req)
 }
 
 export async function POST(req: NextRequest) {
+  const _rl = rateLimitResponse(req)
+  if (_rl) return _rl
+
   return runQueueHandler(req)
 }
 

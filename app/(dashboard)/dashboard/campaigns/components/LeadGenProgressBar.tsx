@@ -2,7 +2,7 @@
 
 const LEAD_CAP = 200
 
-type Stage = "searching" | "enriching" | "complete"
+type Stage = "searching" | "enriching" | "filling" | "expanding" | "complete"
 
 type Props = {
   leadCount: number
@@ -22,7 +22,13 @@ function getStatusText(
   }
   // generating
   if (stage === "enriching") {
-    return "Finding lead information..."
+    return "Finding email addresses..."
+  }
+  if (stage === "filling") {
+    return `Finding more businesses to reach ${LEAD_CAP} emails...`
+  }
+  if (stage === "expanding") {
+    return "Expanding search to find more emails..."
   }
   return "Finding businesses..."
 }
@@ -37,7 +43,7 @@ export function LeadGenProgressBar({ leadCount, status, stage }: Props) {
   return (
     <div className="mb-8">
       <p className="mb-2 text-sm font-medium text-zinc-300 tabular-nums">
-        {displayCount} / {LEAD_CAP} Leads Found
+        {displayCount} / {LEAD_CAP} emails
         {isDone && <span className="ml-2 text-emerald-400">✓</span>}
       </p>
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">

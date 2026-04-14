@@ -1,29 +1,39 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+/**
+ * Lead-list inbox — all thread messages from `supabase.from("messages").select("*")` filtered by `thread_id`.
+ * No Gmail API in this file; sync inserts inbound rows in the background.
+ */
+
+import { useState, useEffect, useCallback, useRef } from "react"
 import { useRouter } from "next/navigation"
 import { supabase } from "@/lib/supabase"
+import { emailBodyToDisplayHtml } from "@/lib/email-body-display"
 
 type LeadWithMessage = {
   id: string
   name?: string | null
   email?: string | null
+  phone?: string | null
   company?: string | null
-  status?: string | null
   tag?: string | null
   summary?: string | null
-  unread?: boolean
+  unread?: boolean | null
+  read?: boolean | null
+  campaign_id?: string | null
+  /** Same as `messages.thread_id` in DB — conversation key for loading/saving messages */
+  thread_id?: string | null
   last_message: string
-  temperature: string
-  score: number | null
 }
 
 type Message = {
   id: string
-  role: "outbound" | "inbound"
+  role: "outbound" | "inbound" | string
   content?: string | null
   channel?: string | null
   created_at?: string | null
+  thread_id?: string | null
+  lead_id?: string | null
 }
 
 type Props = {
@@ -33,16 +43,15 @@ type Props = {
 export function InboxClient({ leads: initialLeads }: Props) {
   const router = useRouter()
   const [leads, setLeads] = useState<LeadWithMessage[]>(initialLeads)
+  const [activeTab, setActiveTab] = useState("all")
+  const [searchQuery, setSearchQuery] = useState("")
   const [selectedLead, setSelectedLead] = useState<LeadWithMessage | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [suggestions, setSuggestions] = useState<string[]>([])
   const [loadingSuggestions, setLoadingSuggestions] = useState(false)
   const [replyText, setReplyText] = useState("")
   const messagesEndRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "auto" })
-  }, [messages])
+  const suggestionsRequestId = useRef(0)
 
   useEffect(() => {
     setLeads(initialLeads)
@@ -110,35 +119,50 @@ export function InboxClient({ leads: initialLeads }: Props) {
       return
     }
 
+    const selectedConversation = { thread_id: selectedLead.thread_id ?? null }
+
     async function loadMessages() {
+      if (!selectedConversation.thread_id) {
+        setMessages([])
+        return
+      }
+
       const { data, error } = await supabase
         .from("messages")
         .select("*")
-        .eq("lead_id", selectedLead!.id)
+        .eq("thread_id", selectedConversation.thread_id)
         .order("created_at", { ascending: true })
 
       if (!error && data) {
         setMessages(data as Message[])
       } else {
+        if (error) console.error("[InboxClient] loadMessages:", error)
         setMessages([])
       }
     }
 
-    loadMessages()
+    void loadMessages()
+
+    if (!selectedConversation.thread_id) {
+      return
+    }
 
     const channel = supabase
-      .channel(`inbox-messages-${selectedLead.id}`)
+      .channel(`inbox-messages-thread-${selectedConversation.thread_id}`)
       .on(
         "postgres_changes",
         {
           event: "INSERT",
           schema: "public",
           table: "messages",
-          filter: `lead_id=eq.${selectedLead.id}`,
+          filter: `thread_id=eq.${selectedConversation.thread_id}`,
         },
         (payload) => {
           const newMessage = payload.new as Message
-          setMessages((prev) => [...prev, newMessage])
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === newMessage.id)) return prev
+            return [...prev, newMessage]
+          })
         }
       )
       .subscribe()
@@ -148,62 +172,189 @@ export function InboxClient({ leads: initialLeads }: Props) {
     }
   }, [selectedLead])
 
-  useEffect(() => {
-    if (!selectedLead || messages.length === 0) {
-      setSuggestions([])
-      return
-    }
+  const generateSuggestions = useCallback(async (leadId: string, threadId?: string | null) => {
+    const req = ++suggestionsRequestId.current
+    setLoadingSuggestions(true)
+    setSuggestions([])
+    try {
+      let { data, error } = await supabase
+        .from("messages")
+        .select("*")
+        .eq("lead_id", leadId)
+        .order("created_at", { ascending: true })
 
-    async function fetchSuggestions() {
-      setLoadingSuggestions(true)
-      try {
-        const mappedMessages = messages.map((m) => ({
-          role: m.role === "inbound" ? "user" : "assistant",
-          content: m.content ?? "",
-        }))
-        const res = await fetch("/api/generate-reply", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: mappedMessages }),
-        })
-        const data = await res.json()
-        const reply = data.reply ?? ""
-        const opts = reply
-          .split(/OPTION \d+:\s*/i)
-          .map((s: string) => s.trim())
-          .filter(Boolean)
-        setSuggestions(opts.slice(0, 3))
-      } catch {
-        setSuggestions([])
-      } finally {
-        setLoadingSuggestions(false)
+      if (req !== suggestionsRequestId.current) return
+
+      const tid = threadId?.trim()
+      if ((!data || data.length === 0) && tid) {
+        const r2 = await supabase
+          .from("messages")
+          .select("*")
+          .eq("thread_id", tid)
+          .order("created_at", { ascending: true })
+        if (req !== suggestionsRequestId.current) return
+        data = r2.data
+        error = r2.error
       }
-    }
 
-    fetchSuggestions()
-  }, [selectedLead, messages])
+      if (req !== suggestionsRequestId.current) return
+
+      if (error || !data?.length) {
+        setSuggestions([])
+        return
+      }
+
+      const mappedMessages = data.map((m) => {
+        const r = (m as Message).role
+        return {
+          role: r === "inbound" || r === "lead" ? "user" : "assistant",
+          content: (m as { content?: string | null }).content ?? "",
+        }
+      })
+
+      const res = await fetch("/api/generate-reply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: mappedMessages }),
+      })
+      const replyData = await res.json()
+      const reply = replyData.reply ?? ""
+      const opts = reply
+        .split(/OPTION \d+:\s*/i)
+        .map((s: string) => s.trim())
+        .filter(Boolean)
+      if (req !== suggestionsRequestId.current) return
+      setSuggestions(opts.slice(0, 3))
+    } catch {
+      if (req === suggestionsRequestId.current) setSuggestions([])
+    } finally {
+      if (req === suggestionsRequestId.current) setLoadingSuggestions(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!selectedLead?.id) return
+    void generateSuggestions(selectedLead.id, selectedLead.thread_id)
+  }, [selectedLead?.id, generateSuggestions])
+
+  function handleRegenerateSuggestions() {
+    if (!selectedLead?.id) return
+    void generateSuggestions(selectedLead.id, selectedLead.thread_id)
+  }
+
+  const searchLower = searchQuery.trim().toLowerCase()
+  const leadsMatchingSearch = leads.filter((lead) => {
+    if (!searchLower) return true
+    const name = (lead.name ?? "").toLowerCase()
+    const email = (lead.email ?? "").toLowerCase()
+    const company = (lead.company ?? "").toLowerCase()
+    return (
+      name.includes(searchLower) ||
+      email.includes(searchLower) ||
+      company.includes(searchLower)
+    )
+  })
+
+  const filteredLeads = leadsMatchingSearch.filter((lead) => {
+    if (activeTab === "all") return true
+    if (activeTab === "unread") return !lead.read
+    return true
+  })
 
   async function handleSendReply(content: string) {
-    if (!selectedLead) return
+    if (!selectedLead?.id) {
+      window.alert("Lead no longer exists")
+      return
+    }
+    const threadId = selectedLead.thread_id?.trim()
+    if (!threadId) {
+      console.warn(
+        "[InboxClient] Cannot send: lead has no thread_id in the database (need a saved message with thread_id)."
+      )
+      return
+    }
     const text = content.trim()
     if (!text) return
 
-    const { error } = await supabase
-      .from("messages")
-      .insert([{ lead_id: selectedLead.id, role: "outbound", content: text }])
+    const { data: leadExists, error: leadCheckErr } = await supabase
+      .from("leads")
+      .select("id")
+      .eq("id", selectedLead.id)
+      .single()
 
-    if (!error) {
-      setReplyText("")
+    if (leadCheckErr || !leadExists) {
+      window.alert("This lead was deleted. Refresh inbox.")
+      return
     }
-    // Message is added via Supabase realtime subscription — do NOT add to state here
+
+    const safeMessage = {
+      content: text,
+      role: "outbound" as const,
+      lead_id: selectedLead.id,
+      thread_id: threadId,
+      campaign_id: selectedLead.campaign_id ?? null,
+    }
+
+    const { data, error } = await supabase
+      .from("messages")
+      .insert(safeMessage)
+      .select("*")
+      .single()
+
+    if (error) {
+      console.error("INSERT FAILED:", error)
+      return
+    }
+
+    setReplyText("")
+    setMessages((prev) => [...prev, data as Message])
   }
 
   return (
     <div className="flex h-[calc(100vh-5rem)] min-h-0 w-full max-w-full overflow-hidden bg-neutral-950 text-white">
-      <div className="w-[320px] border-r border-zinc-800 flex-shrink-0 overflow-y-auto">
-        <div className="p-4 text-lg font-semibold">Inbox</div>
+      <div className="flex w-[320px] flex-shrink-0 flex-col border-r border-zinc-800 min-h-0">
+        <div className="shrink-0 border-b border-zinc-800">
+          <div className="p-4 pb-2 text-lg font-semibold">Inbox</div>
+          <div className="px-4 pb-3">
+            <input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search leads..."
+              className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-white outline-none placeholder:text-zinc-500 focus:border-zinc-600 focus:ring-1 focus:ring-zinc-600"
+            />
+          </div>
+          <div className="px-3 mb-3">
+            <div className="flex gap-2">
+              {[
+                { key: "all", label: "All" },
+                { key: "unread", label: "Unread" },
+              ].map((tab) => (
+                <button
+                  key={tab.key}
+                  type="button"
+                  onClick={() => setActiveTab(tab.key)}
+                  className={`px-3 py-1 rounded-full text-sm transition ${
+                    activeTab === tab.key
+                      ? "bg-white text-black"
+                      : "bg-white/10 text-white hover:bg-white/20"
+                  }`}
+                >
+                  {tab.label}
+                  <span className="ml-1 opacity-70">
+                    (
+                    {tab.key === "all"
+                      ? leads.length
+                      : leads.filter((l) => !l.read).length}
+                    )
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
 
-        {leads.map((lead) => (
+        <div className="min-h-0 flex-1 overflow-y-auto">
+        {filteredLeads.map((lead) => (
           <div
             key={lead.id}
             onClick={async () => {
@@ -230,29 +381,26 @@ export function InboxClient({ leads: initialLeads }: Props) {
                   >
                     {lead.name ?? "Unnamed Lead"}
                   </span>
-                  <span className="text-xs text-gray-400 shrink-0">
-                    {lead.temperature}
-                  </span>
                 </div>
 
                 <div className="text-sm text-gray-400 mt-1 truncate">
                   {lead.last_message}
-                </div>
-
-                <div className="flex items-center gap-2 mt-1">
-                  <span className="text-xs text-green-400">{lead.score ?? "—"}</span>
-                  <span className="text-xs text-gray-500">/100</span>
                 </div>
               </div>
             </div>
           </div>
         ))}
 
-        {leads.length === 0 && (
+        {filteredLeads.length === 0 && (
           <div className="p-4 text-sm text-gray-500">
-            No conversations yet. Start a campaign to begin messaging leads.
+            {leads.length === 0
+              ? "No conversations yet. Start a campaign to begin messaging leads."
+              : leadsMatchingSearch.length === 0
+                ? "No matches for your search."
+                : "No leads match this filter."}
           </div>
         )}
+        </div>
       </div>
 
       <div className="flex-1 min-w-0 min-h-0 flex px-4 py-4 overflow-hidden gap-4">
@@ -263,7 +411,7 @@ export function InboxClient({ leads: initialLeads }: Props) {
               <div className="px-6 py-4 border-b border-zinc-800 shrink-0">
                 <div className="text-xs tracking-wide text-zinc-500 uppercase">Conversation</div>
               </div>
-              <div className="flex-1 min-h-0 overflow-y-auto scroll-smooth px-4 py-4 space-y-4">
+              <div className="flex flex-1 min-h-0 flex-col gap-3 overflow-y-auto scroll-smooth px-4 py-4">
                 {messages.length === 0 ? (
                   <>
                     <p className="text-sm text-zinc-500">No conversation yet</p>
@@ -271,31 +419,37 @@ export function InboxClient({ leads: initialLeads }: Props) {
                   </>
                 ) : (
                   <>
-                    {messages.map((msg) => (
-                      <div
-                        key={msg.id}
-                        className={`flex flex-col ${msg.role === "outbound" ? "items-end" : "items-start"}`}
-                      >
-                        <div
-                          className={`flex ${msg.role === "outbound" ? "justify-end" : "justify-start"}`}
-                        >
+                    {messages.map((msg) => {
+                      const isUser =
+                        msg.role === "outbound" ||
+                        (msg as { sender?: string }).sender === "user"
+                      return (
+                        <div key={msg.id} className="flex w-full flex-col gap-1">
                           <div
-                            className={
-                              msg.role === "outbound"
-                                ? "bg-blue-600 text-white p-4 rounded-2xl rounded-br-md max-w-[min(85%,28rem)] text-base leading-relaxed"
-                                : "bg-neutral-800 text-white p-4 rounded-2xl rounded-bl-md max-w-[min(85%,28rem)] text-base leading-relaxed"
-                            }
+                            className={`flex w-full ${isUser ? "justify-end" : "justify-start"}`}
                           >
-                            {msg.content ?? "—"}
+                            <div
+                              className={[
+                                "max-w-[60%] break-words rounded-2xl px-4 py-2 text-sm leading-relaxed whitespace-pre-wrap shadow-sm transition-all duration-150 [&_a]:underline",
+                                isUser
+                                  ? "bg-blue-500 text-white hover:bg-blue-500/95 [&_a]:text-white"
+                                  : "bg-white/10 text-white hover:bg-white/[0.12] [&_a]:text-blue-200",
+                              ].join(" ")}
+                              dangerouslySetInnerHTML={{
+                                __html: emailBodyToDisplayHtml(msg.content) || "—",
+                              }}
+                            />
+                          </div>
+                          <div
+                            className={`flex w-full ${isUser ? "justify-end" : "justify-start"}`}
+                          >
+                            <span className="px-1 text-[10px] uppercase tracking-wider text-zinc-500">
+                              {isUser ? "You · email" : "Lead · email"}
+                            </span>
                           </div>
                         </div>
-                        {msg.role === "outbound" && (msg.channel === "sms" || msg.channel === "email") && (
-                          <span className="mt-1 text-[10px] uppercase tracking-wider text-zinc-500">
-                            {msg.channel}
-                          </span>
-                        )}
-                      </div>
-                    ))}
+                      )
+                    })}
                     <div ref={messagesEndRef} />
                   </>
                 )}
@@ -320,8 +474,18 @@ export function InboxClient({ leads: initialLeads }: Props) {
 
             {/* AI Reply Suggestions - right next to messages */}
             <div className="w-[300px] border border-zinc-800 flex-shrink-0 flex flex-col overflow-hidden rounded-xl bg-zinc-900">
-              <div className="p-4 border-b border-zinc-800 text-sm font-semibold uppercase tracking-wider text-zinc-500">
-                AI Reply Suggestions
+              <div className="flex items-center justify-between gap-2 border-b border-zinc-800 p-4">
+                <div className="text-sm font-semibold uppercase tracking-wider text-zinc-500">
+                  AI Reply Suggestions
+                </div>
+                <button
+                  type="button"
+                  disabled={loadingSuggestions}
+                  onClick={handleRegenerateSuggestions}
+                  className="shrink-0 text-xs text-blue-400 hover:text-blue-300 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Regenerate
+                </button>
               </div>
               <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-3 conversation-scroll">
                 {loadingSuggestions ? (
@@ -349,14 +513,17 @@ export function InboxClient({ leads: initialLeads }: Props) {
                   Lead at a glance
                 </div>
                 <div className="space-y-4">
-                  <div className="flex items-center justify-between gap-4">
-                    <span className="text-base text-zinc-400">Score</span>
-                    <span className="text-xl font-semibold text-white">{selectedLead.score ?? "—"}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-4">
-                    <span className="text-base text-zinc-400">Intent</span>
-                    <span className="text-base font-medium text-zinc-200">{selectedLead.temperature}</span>
-                  </div>
+                  {selectedLead.phone && (
+                    <div>
+                      <span className="text-sm text-zinc-500 block mb-0.5">Phone</span>
+                      <a
+                        href={`tel:${String(selectedLead.phone).replace(/\s/g, "")}`}
+                        className="text-base text-zinc-200 hover:text-white transition"
+                      >
+                        {selectedLead.phone}
+                      </a>
+                    </div>
+                  )}
                   {selectedLead.company && (
                     <div>
                       <span className="text-sm text-zinc-500 block mb-0.5">Company</span>
@@ -403,9 +570,8 @@ export function InboxClient({ leads: initialLeads }: Props) {
                   Today&apos;s Activity
                 </div>
                 <div className="space-y-1 text-sm">
-                  <div>• {leads.length} New Leads</div>
-                  <div>• {leads.filter((l) => l.temperature === "🟡 Warm" || l.temperature === "🔥 Hot").length} Warm Lead{leads.filter((l) => l.temperature === "🟡 Warm" || l.temperature === "🔥 Hot").length !== 1 ? "s" : ""}</div>
-                  <div>• 0 Replies Needed</div>
+                  <div>• {leads.length} conversations</div>
+                  <div>• 0 replies needed</div>
                 </div>
               </div>
 
@@ -427,9 +593,9 @@ export function InboxClient({ leads: initialLeads }: Props) {
                   AI Suggestions
                 </div>
                 <div className="space-y-1 text-sm">
-                  <div>• Follow up with warm leads</div>
+                  <div>• Follow up on open threads</div>
                   <div>• Send pricing breakdown</div>
-                  <div>• Ask qualifying question</div>
+                  <div>• Ask a qualifying question</div>
                 </div>
               </div>
             </div>

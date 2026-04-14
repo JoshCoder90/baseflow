@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react"
 import { supabase } from "@/lib/supabase"
 
-type Stage = "searching" | "enriching" | "complete"
+type Stage = "searching" | "enriching" | "filling" | "expanding" | "complete"
 
 type Props = {
   campaignId: string
@@ -14,9 +14,13 @@ type Props = {
   onLeadCountChange?: (count: number) => void
 }
 
+/**
+ * Subscribes to campaign row updates only. Scraping is started from "Find Leads" (CreateCampaignForm),
+ * not from useEffect, so we never auto-fire the API on mount.
+ */
 export function LeadGenerationProgress({
   campaignId,
-  targetSearchQuery,
+  targetSearchQuery: _targetSearchQuery,
   initialStatus = "generating",
   onStatusChange,
   onStageChange,
@@ -25,23 +29,6 @@ export function LeadGenerationProgress({
     initialStatus
   )
   const [stage, setStage] = useState<Stage | null>(null)
-
-  useEffect(() => {
-    if (initialStatus !== "generating") return
-
-    fetch("/api/generate-leads", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        campaign_id: campaignId,
-        search_query: targetSearchQuery,
-      }),
-    }).catch((err) => {
-      console.error("Lead generation trigger failed:", err)
-      setStatus("failed")
-      onStatusChange?.("failed")
-    })
-  }, [campaignId, targetSearchQuery, initialStatus])
 
   useEffect(() => {
     const channel = supabase

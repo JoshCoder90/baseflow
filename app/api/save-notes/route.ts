@@ -1,5 +1,11 @@
 import { NextResponse } from "next/server"
 import { createClient } from "@supabase/supabase-js"
+import {
+  INPUT_MAX,
+  validateText,
+  validateUuid,
+} from "@/lib/api-input-validation"
+import { rateLimitResponse } from "@/lib/rateLimit"
 
 export const runtime = "nodejs"
 
@@ -9,16 +15,24 @@ const supabase = createClient(
 )
 
 export async function POST(req: Request) {
+  const _rl = rateLimitResponse(req)
+  if (_rl) return _rl
+
   try {
-    const { leadId, notes } = await req.json()
-    if (!leadId) {
-      return NextResponse.json({ error: "leadId required" }, { status: 400 })
-    }
+    const body = await req.json()
+    const vl = validateUuid(body.leadId, "leadId")
+    if (!vl.ok) return vl.response
+    const vn = validateText(body.notes, {
+      required: false,
+      maxLen: INPUT_MAX.long,
+      field: "notes",
+    })
+    if (!vn.ok) return vn.response
 
     const { error } = await supabase
       .from("leads")
-      .update({ internal_notes: notes ?? "" })
-      .eq("id", leadId)
+      .update({ internal_notes: vn.value })
+      .eq("id", vl.value)
 
     if (error) {
       console.error("Notes save error:", error)

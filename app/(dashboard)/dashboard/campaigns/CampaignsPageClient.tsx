@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
 import { supabase } from "@/lib/supabase"
@@ -8,7 +8,6 @@ import { CampaignCard } from "./components/CampaignCard"
 import { DeleteCampaignModal } from "./components/DeleteCampaignModal"
 import { EmptyCampaignState } from "./components/EmptyCampaignState"
 
-type FollowUpStep = { day: number; type: string }
 type Campaign = {
   id: string
   name?: string | null
@@ -17,9 +16,11 @@ type Campaign = {
   audience_id?: string | null
   audiences?: { id: string; name: string | null; niche: string | null; location: string | null } | null
   message_template?: string | null
-  follow_up_schedule?: string | FollowUpStep[] | null
   status?: string | null
   created_at?: string | null
+  sent_count?: number | null
+  /** Live count from `campaign_messages` (queued / sending / pending), same as campaign detail queue. */
+  queue_not_sent?: number | null
 }
 
 type Props = {
@@ -30,6 +31,27 @@ export function CampaignsPageClient({ initialCampaigns }: Props) {
   const router = useRouter()
   const [campaigns, setCampaigns] = useState<Campaign[]>(initialCampaigns)
   const [deleteTarget, setDeleteTarget] = useState<Campaign | null>(null)
+
+  const refetchCampaigns = useCallback(async () => {
+    try {
+      const res = await fetch("/api/campaigns/list-data", { cache: "no-store" })
+      if (!res.ok) return
+      const payload = (await res.json()) as { campaigns?: Campaign[] }
+      if (Array.isArray(payload.campaigns)) {
+        setCampaigns(payload.campaigns)
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  useEffect(() => {
+    void refetchCampaigns()
+    const interval = setInterval(() => {
+      void refetchCampaigns()
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [refetchCampaigns])
 
   async function handleDeleteCampaign(campaignId: string) {
     await supabase.from("campaigns").delete().eq("id", campaignId)
@@ -63,7 +85,11 @@ export function CampaignsPageClient({ initialCampaigns }: Props) {
           <div className="flex flex-col gap-2 rounded-2xl border border-blue-500/20 bg-gradient-to-br from-blue-600/20 to-blue-900/20 bg-zinc-800/60 p-6 text-white shadow-xl shadow-black/20 transition duration-200 hover:scale-[1.02]">
             <p className="text-sm uppercase tracking-wide text-neutral-300">Active Campaigns</p>
             <p className="text-3xl font-semibold tabular-nums">
-              {campaigns.filter((c) => c.status === "active").length}
+              {
+                campaigns.filter(
+                  (c) => c.status === "active" || c.status === "sending"
+                ).length
+              }
             </p>
             <p className="text-xs text-emerald-400">+0 this week</p>
           </div>
