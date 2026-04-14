@@ -1,6 +1,6 @@
 /**
  * Next.js server bootstrap: starts the send-queue poller and Gmail sync once per Node process.
- * On Vercel serverless, prefer vercel.json crons → /api/process-send-queue.
+ * On Vercel serverless, queue ticks are driven by Supabase (or another caller) hitting /api/process-send-queue, not Vercel Cron.
  * Gmail loop only runs when shouldStart matches (see lib/gmail-sync-loop.ts); set ENABLE_GMAIL_AUTO_SYNC=1 on Vercel if needed.
  */
 
