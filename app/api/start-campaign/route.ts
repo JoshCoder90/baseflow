@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server"
-import { Resend } from "resend"
 import { createClient } from "@supabase/supabase-js"
 import { createClient as createServerClient } from "@/lib/supabase/server"
 import { refreshGmailAccessToken } from "@/lib/gmail-auth"
@@ -13,48 +12,8 @@ import { validateQueryUuid } from "@/lib/api-input-validation"
 import { heavyRouteIpLimitResponse } from "@/lib/ip-rate-limit"
 import { rateLimitResponse } from "@/lib/rateLimit"
 
-const resend = new Resend(process.env.RESEND_API_KEY)
-
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY || ""
-
-async function sendViaGmail(
-  accessToken: string,
-  fromEmail: string,
-  toEmail: string,
-  subject: string,
-  body: string
-): Promise<void> {
-  const message = [
-    `From: ${fromEmail}`,
-    `To: ${toEmail}`,
-    `Subject: ${subject}`,
-    "MIME-Version: 1.0",
-    "Content-Type: text/html; charset=UTF-8",
-    "",
-    body,
-  ].join("\r\n")
-
-  const encodedMessage = Buffer.from(message)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "")
-
-  const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ raw: encodedMessage }),
-  })
-
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Gmail API error: ${res.status} ${err}`)
-  }
-}
 
 export async function POST(req: NextRequest) {
   const _ip = heavyRouteIpLimitResponse(req, "start-campaign")
@@ -106,6 +65,44 @@ export async function POST(req: NextRequest) {
     if (campaign.status === "active" || campaign.status === "sending") {
       console.log("Campaign already active - skipping duplicate run")
       return NextResponse.json({ error: "Campaign already sending" }, { status: 409 })
+    }
+
+    const { data: gmailConn } = await supabase
+      .from("gmail_connections")
+      .select("*")
+      .eq("user_id", user.id)
+      .maybeSingle()
+
+    const gmailOk =
+      !!gmailConn?.access_token &&
+      !!gmailConn?.gmail_email &&
+      gmailConn?.connected === true
+
+    if (!gmailOk) {
+      return NextResponse.json(
+        { error: "Connect Gmail in settings to start campaigns" },
+        { status: 400 }
+      )
+    }
+
+    let accessToken = gmailConn!.access_token as string
+    if (gmailConn!.refresh_token) {
+      try {
+        accessToken = await refreshGmailAccessToken(gmailConn!.refresh_token as string)
+        await supabase
+          .from("gmail_connections")
+          .update({ access_token: accessToken, updated_at: new Date().toISOString() })
+          .eq("user_id", user.id)
+      } catch (err) {
+        console.error("Gmail token refresh failed:", err)
+      }
+    }
+
+    if (!accessToken) {
+      return NextResponse.json(
+        { error: "Gmail token expired. Please reconnect Gmail." },
+        { status: 400 }
+      )
     }
 
     // RESUME: If campaign has messages already, activate + queue new leads + backfill missing steps
@@ -252,38 +249,6 @@ export async function POST(req: NextRequest) {
         message: "Campaign resumed. Pending emails will send gradually.",
       })
     }
-
-    const { data: gmailConn } = await supabase
-      .from("gmail_connections")
-      .select("*")
-      .eq("user_id", user.id)
-      .maybeSingle()
-
-    const useGmail =
-      !!gmailConn?.access_token &&
-      !!gmailConn?.gmail_email &&
-      gmailConn?.connected === true
-
-    let accessToken = gmailConn?.access_token as string | undefined
-    if (useGmail && gmailConn?.refresh_token && accessToken) {
-      try {
-        accessToken = await refreshGmailAccessToken(gmailConn.refresh_token)
-        await supabase
-          .from("gmail_connections")
-          .update({ access_token: accessToken, updated_at: new Date().toISOString() })
-          .eq("user_id", user.id)
-      } catch (err) {
-        console.error("Gmail token refresh failed:", err)
-        console.log("Falling back to stored access_token (may be expired)")
-      }
-    }
-
-    const fromEmail = useGmail
-      ? gmailConn!.gmail_email
-      : "BaseFlow <noreply@gobaseflow.com>"
-
-    console.log("gmailConn:", gmailConn ? { user_id: gmailConn.user_id, gmail_email: gmailConn.gmail_email, connected: gmailConn.connected } : null)
-    console.log(useGmail ? "Sending via Gmail" : "Sending via Resend")
 
     let { data: leads, error } = await supabase
       .from("leads")

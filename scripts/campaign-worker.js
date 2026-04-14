@@ -1,25 +1,33 @@
 /**
- * Campaign worker - calls the API every 60 seconds to send outreach emails.
- * Requires Next.js server to be running (npm run dev or npm run start).
- * Run with: node scripts/campaign-worker.js
+ * Optional HTTP poller: hits POST /api/process-send-queue (same as Supabase queue ticks).
+ * Requires Next.js running. Prefer: npm run queue-worker
+ *
+ * Env: WORKER_URL (default http://localhost:3000/api/process-send-queue)
+ *      CRON_SECRET — if set in the app, send Authorization: Bearer <secret>
  */
 
 require("dotenv").config({ path: ".env.local" })
 
-const WORKER_URL = process.env.WORKER_URL || "http://localhost:3000/api/cron/run-campaign-worker"
+const WORKER_URL =
+  process.env.WORKER_URL || "http://localhost:3000/api/process-send-queue"
+const CRON_SECRET = process.env.CRON_SECRET
 
-async function runCampaignWorker() {
+async function tick() {
   try {
-    const res = await fetch(WORKER_URL)
-    const data = await res.json()
-    if (data.processed > 0) {
-      console.log("Campaign worker processed", data.processed, "emails")
+    const headers = {}
+    if (CRON_SECRET) {
+      headers.Authorization = `Bearer ${CRON_SECRET}`
+    }
+    const res = await fetch(WORKER_URL, { method: "POST", headers })
+    const data = await res.json().catch(() => ({}))
+    if (data.processed != null && data.processed > 0) {
+      console.log("process-send-queue processed", data.processed)
     }
   } catch (err) {
-    console.error("Campaign worker fetch failed:", err.message)
+    console.error("Queue tick fetch failed:", err.message)
   }
 }
 
-console.log("Campaign worker started - running every 60 seconds")
-runCampaignWorker()
-setInterval(runCampaignWorker, 60000)
+console.log("Queue HTTP poller —", WORKER_URL, "every 60s")
+tick()
+setInterval(tick, 60000)
