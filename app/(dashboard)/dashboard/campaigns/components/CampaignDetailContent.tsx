@@ -294,7 +294,7 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
         const res = await fetch("/api/scrape-batch", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ campaign_id: campaignId }),
+          body: JSON.stringify({ campaignId: campaign.id }),
         })
         const data = (await res.json()) as {
           done?: boolean

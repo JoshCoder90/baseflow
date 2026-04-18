@@ -25,17 +25,39 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
-  let body: { campaign_id?: string }
+  let body: { campaignId?: string; campaign_id?: string }
   try {
-    body = (await req.json()) as { campaign_id?: string }
+    body = (await req.json()) as { campaignId?: string; campaign_id?: string }
   } catch {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 })
   }
 
-  const v = validateUuid(body.campaign_id ?? "", "campaign_id")
+  const rawCampaignId = body.campaignId ?? body.campaign_id
+  if (!rawCampaignId) {
+    return NextResponse.json({ error: "Missing campaignId" }, { status: 400 })
+  }
+
+  const v = validateUuid(rawCampaignId, "campaignId")
   if (!v.ok) return v.response
 
+  const campaignId = v.value
+  console.log("Scraping campaign:", campaignId)
+
   const supabase = createClient(supabaseUrl, supabaseServiceKey)
+
+  const { data: campaign, error: campaignFetchErr } = await supabase
+    .from("campaigns")
+    .select("*")
+    .eq("id", campaignId)
+    .single()
+
+  if (campaignFetchErr || !campaign) {
+    return NextResponse.json({ error: "Campaign not found" }, { status: 404 })
+  }
+
+  if ((campaign as { user_id?: string }).user_id !== sessionUser.id) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 403 })
+  }
 
   const daily = await dailyUsageLimitResponseIfExceeded(supabase, sessionUser.id)
   if (daily) return daily
@@ -47,7 +69,7 @@ export async function POST(req: Request) {
 
   const result = await runCampaignScrapeBatch({
     supabase,
-    campaignId: v.value,
+    campaignId,
     userId: sessionUser.id,
     apiKey,
   })
