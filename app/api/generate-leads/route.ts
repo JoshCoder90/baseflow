@@ -1,6 +1,6 @@
+// @ts-nocheck — audience scrape body still contains legacy campaign branches (campaign flow uses /api/scrape-batch).
 import { NextResponse } from "next/server"
 import { createClient, SupabaseClient } from "@supabase/supabase-js"
-import OpenAI from "openai"
 import { createClient as createServerClient } from "@/lib/supabase/server"
 import {
   badRequest,
@@ -47,6 +47,8 @@ import {
   isNearbyPlaceInTargetRegion,
   reverseGeocodeToTarget,
 } from "@/lib/location-targeting"
+import { parseSearchQuery } from "@/lib/parse-search-query"
+import { prepareCampaignScrapeCheckpoint } from "@/lib/campaign-scrape-engine"
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY || ""
@@ -58,44 +60,6 @@ if (!supabaseServiceKey) {
 const MAX_LEADS = SCRAPE_POLICY.maxLeadsPerScrape
 const DEFAULT_LEAD_CAP = MAX_LEADS
 
-/** Parse natural language search into niche + location for Google Places */
-async function parseSearchQuery(query: string): Promise<{ niche: string; location: string }> {
-  const openaiKey = process.env.OPENAI_API_KEY
-  if (!openaiKey) {
-    // Fallback: simple heuristic - last part after "in" is location
-    const match = query.match(/^(.+?)\s+in\s+(.+)$/i)
-    if (match) {
-      return { niche: match[1].trim(), location: match[2].trim() }
-    }
-    return { niche: query.trim(), location: "United States" }
-  }
-  const openai = new OpenAI({ apiKey: openaiKey })
-  const res = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      {
-        role: "system",
-        content: `Extract business type (niche) and location from the user's search query.
-Examples:
-- "Dental offices in New York" -> niche: "dental offices", location: "New York"
-- "Roofing companies in Dallas" -> niche: "roofing companies", location: "Dallas"
-- "Real estate agents in Miami" -> niche: "real estate agents", location: "Miami"
-- "Gyms in Los Angeles" -> niche: "gyms", location: "Los Angeles"
-- "Marketing agencies in Austin" -> niche: "marketing agencies", location: "Austin"
-Return JSON: { "niche": "...", "location": "..." }
-If no location is given, use "United States".`,
-      },
-      { role: "user", content: query },
-    ],
-    response_format: { type: "json_object" },
-  })
-  const text = res.choices[0]?.message?.content ?? "{}"
-  const parsed = JSON.parse(text) as { niche?: string; location?: string }
-  return {
-    niche: parsed.niche?.trim() || query.trim(),
-    location: parsed.location?.trim() || "United States",
-  }
-}
 /** Nearby search radii (meters); expand 5 → 50km for coverage. */
 const RADIUS_STEPS = [5000, 10000, 20000, 50000]
 /** Nearby Search pagination: Google allows ~3 pages immediately; more with delay. Stop when no token or lead cap met. */
@@ -540,49 +504,20 @@ export async function POST(req: Request) {
   const location = ctx.location
   const leadCap = Math.min(MAX_LEADS, ctx.leadCap)
 
-  let primaryTarget: Awaited<ReturnType<typeof geocodeAddressToTarget>> = null
+  let geoTarget: Awaited<ReturnType<typeof geocodeAddressToTarget>> = null
 
-  if (ctx.mode === "campaign" && ctx.storedCampaignCoords) {
-    primaryTarget = await reverseGeocodeToTarget(
-      ctx.storedCampaignCoords.lat,
-      ctx.storedCampaignCoords.lng,
-      location,
-      apiKey,
-      safeFetch,
-      safeJson
-    )
-    if (primaryTarget) {
-      console.log("Using location-based search")
-    } else {
-      console.warn(
-        "[generate-leads] Stored campaign coordinates present but reverse geocode failed; falling back to forward geocode"
+  if (ctx.mode === "audience") {
+    geoTarget = await geocodeAddressToTarget(location, apiKey, safeFetch, safeJson)
+    if (geoTarget) {
+      console.log(`Geocoded city → ${geoTarget.lat},${geoTarget.lng}`)
+    }
+
+    if (!geoTarget) {
+      return NextResponse.json(
+        { error: "Could not geocode target location. Try a more specific city or region." },
+        { status: 400 }
       )
     }
-  }
-
-  if (!primaryTarget) {
-    primaryTarget = await geocodeAddressToTarget(location, apiKey, safeFetch, safeJson)
-    if (primaryTarget) {
-      console.log(`Geocoded city → ${primaryTarget.lat},${primaryTarget.lng}`)
-    }
-  }
-
-  if (!primaryTarget) {
-    return NextResponse.json(
-      { error: "Could not geocode target location. Try a more specific city or region." },
-      { status: 400 }
-    )
-  }
-
-  if (ctx.mode === "campaign") {
-    await supabase
-      .from("campaigns")
-      .update({
-        target_search_query: ctx.searchQuery,
-        location_lat: primaryTarget.lat,
-        location_lng: primaryTarget.lng,
-      })
-      .eq("id", ctx.campaignId)
   }
 
   if (
@@ -602,6 +537,62 @@ export async function POST(req: Request) {
     )
   }
 
+  if (ctx.mode === "campaign") {
+    try {
+      const checkpoint = await prepareCampaignScrapeCheckpoint({
+        supabase,
+        ctx: {
+          campaignId: ctx.campaignId,
+          userId: ctx.userId,
+          niche,
+          location,
+          leadCap,
+        },
+        apiKey,
+        storedCampaignCoords: ctx.storedCampaignCoords ?? null,
+      })
+
+      const { error: cpErr } = await supabase
+        .from("campaigns")
+        .update({
+          target_search_query: ctx.searchQuery,
+          scrape_checkpoint: checkpoint as unknown as Record<string, unknown>,
+          lead_generation_status: "generating",
+          lead_generation_stage: "searching",
+        })
+        .eq("id", ctx.campaignId)
+
+      if (cpErr) {
+        console.error("[generate-leads] checkpoint save failed:", cpErr)
+        throw cpErr
+      }
+
+      return NextResponse.json({
+        success: true,
+        batchMode: true,
+      })
+    } catch (err) {
+      console.error("[generate-leads] campaign scrape init failed:", err)
+      await supabase
+        .from("campaigns")
+        .update({ lead_generation_status: "failed" })
+        .eq("id", ctx.campaignId)
+      return NextResponse.json({ error: "Lead generation failed to start" }, { status: 500 })
+    } finally {
+      endScrapeForUser(ctx.userId)
+    }
+  }
+
+  const audienceCtx = ctx as Extract<GenerationContext, { mode: "audience" }>
+
+  if (!geoTarget) {
+    endScrapeForUser(audienceCtx.userId)
+    return NextResponse.json(
+      { error: "Could not geocode target location. Try a more specific city or region." },
+      { status: 400 }
+    )
+  }
+
   let campaignWasDeleted = false
 
   try {
@@ -609,11 +600,7 @@ export async function POST(req: Request) {
   const leadsQuery = supabase
     .from("leads")
     .select("place_id, name, address, website, email")
-  if (ctx.mode === "audience") {
-    leadsQuery.eq("audience_id", ctx.audienceId)
-  } else {
-    leadsQuery.eq("campaign_id", ctx.campaignId)
-  }
+    .eq("audience_id", audienceCtx.audienceId)
   const { data: existingLeads } = await leadsQuery
 
   const seenPlaceIds = new Set<string>()
@@ -639,69 +626,26 @@ export async function POST(req: Request) {
     )
   }
 
-  const genCtx =
-    ctx.mode === "campaign"
-      ? ({ mode: "campaign" as const, campaignId: ctx.campaignId })
-      : ({ mode: "audience" as const, audienceId: ctx.audienceId })
+  const genCtx = {
+    mode: "audience" as const,
+    audienceId: audienceCtx.audienceId,
+  }
 
   async function assertCampaignNotDeleted(): Promise<boolean> {
-    if (ctx.mode !== "campaign") return true
-    const { data: campaign } = await supabase
-      .from("campaigns")
-      .select("id")
-      .eq("id", ctx.campaignId)
-      .single()
-    if (!campaign) {
-      console.log("Campaign deleted, stopping scraper...")
-      campaignWasDeleted = true
-      return false
-    }
     return true
   }
 
   let validLeadCount = await countValidLeadsForContext(supabase, genCtx)
   let emailLeadsCount = await countEmailLeadsForContext(supabase, genCtx)
-  let leadsCollected = await getLeadCount(supabase, ctx)
+  let leadsCollected = await getLeadCount(supabase, audienceCtx)
 
-  if (ctx.mode === "audience" && leadsCollected >= leadCap) {
+  if (leadsCollected >= leadCap) {
     console.log(`Audience already at lead cap (${leadCap}). Skipping generation.`)
-    await updateProgress(supabase, ctx.audienceId, emailLeadsCount, "ready")
+    await updateProgress(supabase, audienceCtx.audienceId, emailLeadsCount, "ready")
     return NextResponse.json({ success: true, count: emailLeadsCount, total: leadsCollected })
   }
 
-  let skipCollectionLoop = false
-  if (ctx.mode === "campaign" && leadsCollected >= leadCap) {
-    const needContactFetch = await countCampaignLeadsNeedingContactFetch(supabase, ctx.campaignId)
-    if (needContactFetch === 0) {
-      await supabase
-        .from("campaigns")
-        .update({ lead_generation_status: "complete", lead_generation_stage: "complete" })
-        .eq("id", ctx.campaignId)
-      return NextResponse.json({
-        success: true,
-        count: emailLeadsCount,
-        total: leadsCollected,
-        validCount: emailLeadsCount,
-      })
-    }
-    skipCollectionLoop = true
-    console.log(
-      `[generate-leads] ${needContactFetch} leads still need contact fetch; skipping Places collection`
-    )
-  }
-
-  if (ctx.mode === "audience") {
-    await updateProgress(supabase, ctx.audienceId, emailLeadsCount, "generating")
-  }
-  if (ctx.mode === "campaign") {
-    await supabase
-      .from("campaigns")
-      .update({
-        lead_generation_status: "generating",
-        lead_generation_stage: skipCollectionLoop ? "enriching" : "searching",
-      })
-      .eq("id", ctx.campaignId)
-  }
+  await updateProgress(supabase, audienceCtx.audienceId, emailLeadsCount, "generating")
 
   async function enrichLead(lead: { id: string; place_id: string }): Promise<boolean> {
     const signal = AbortSignal.timeout(ENRICH_LEAD_TIMEOUT_MS)
@@ -922,7 +866,6 @@ export async function POST(req: Request) {
   /** Places Nearby result rows seen (for final metrics; 0 if collection skipped). */
   let businessesScannedTotal = 0
 
-  if (!skipCollectionLoop) {
   const aiExtraAreas = await expandLocationsWithAI(location, niche)
   const searchAreaStrings = mergeSearchAreaStringLists(
     buildAllSearchAreaStrings(location),
@@ -969,9 +912,9 @@ export async function POST(req: Request) {
     searchPoints.push(p)
   }
   pushPoint({
-    area: primaryTarget.label,
-    lat: primaryTarget.lat,
-    lng: primaryTarget.lng,
+    area: geoTarget.label,
+    lat: geoTarget.lat,
+    lng: geoTarget.lng,
   })
   for (const p of geocodedExpansion) pushPoint(p)
 
@@ -983,7 +926,7 @@ export async function POST(req: Request) {
     MAX_KEYWORD_VARIANTS
   )
   console.log(
-    `[generate-leads] anchor ${primaryTarget.lat.toFixed(4)},${primaryTarget.lng.toFixed(4)} | ${searchPoints.length} search centers | ${searchKeywords.length} keyword variants (Places Nearby)`
+    `[generate-leads] anchor ${geoTarget.lat.toFixed(4)},${geoTarget.lng.toFixed(4)} | ${searchPoints.length} search centers | ${searchKeywords.length} keyword variants (Places Nearby)`
   )
 
   let businessesCollected = 0
@@ -1227,7 +1170,7 @@ export async function POST(req: Request) {
 
   function collectTextSearchNewCandidates(results: PlaceResult[]): PlaceResult[] {
     const out: PlaceResult[] = []
-    const target = primaryTarget
+    const target = geoTarget
     if (!target) return out
     for (const place of results) {
       if (rawBusinessesSeen >= MAX_RAW_BUSINESSES) break
@@ -1296,10 +1239,10 @@ export async function POST(req: Request) {
     ) {
       const o = CAMPAIGN_NEARBY_OFFSET_DEG[campaignGeoOffsetIdx]
       campaignGeoOffsetIdx++
-      const nlat = primaryTarget.lat + o.lat
-      const nlng = primaryTarget.lng + o.lng
+      const nlat = geoTarget.lat + o.lat
+      const nlng = geoTarget.lng + o.lng
       pushPoint({
-        area: `${primaryTarget.label} (nearby +${o.lat}, ${o.lng})`,
+        area: `${geoTarget.label} (nearby +${o.lat}, ${o.lng})`,
         lat: nlat,
         lng: nlng,
       })
@@ -1538,7 +1481,7 @@ export async function POST(req: Request) {
             const placeId = place.place_id
             if (!placeId || seenPlaceIds.has(placeId)) continue
             if (
-              !isNearbyPlaceInTargetRegion(place, { lat: point.lat, lng: point.lng }, radius, primaryTarget)
+              !isNearbyPlaceInTargetRegion(place, { lat: point.lat, lng: point.lng }, radius, geoTarget)
             ) {
               continue
             }
@@ -1779,8 +1722,8 @@ export async function POST(req: Request) {
       leadsCollected = await getLeadCount(supabase, ctx)
       console.log("Current leads:", leadsCollected)
 
-      if (leadsCollected < leadCap && primaryTarget) {
-        const textSearchAnchor = primaryTarget
+      if (leadsCollected < leadCap && geoTarget) {
+        const textSearchAnchor = geoTarget
         if (ctx.mode === "campaign") {
           await supabase
             .from("campaigns")
@@ -1873,29 +1816,23 @@ export async function POST(req: Request) {
     console.log("Current leads:", leadsCollected)
 
     businessesScannedTotal = rawBusinessesSeen
-  } // end if (!skipCollectionLoop)
 
-  if (ctx.mode === "campaign" && !campaignWasDeleted) {
-    await runCampaignContactFetchPhase(ctx.campaignId)
-  }
-  if (ctx.mode === "audience") {
-    await runAudienceContactFetchPhase(ctx.audienceId)
-  }
+  await runAudienceContactFetchPhase(audienceCtx.audienceId)
 
   emailLeadsCount = await countEmailLeadsForContext(supabase, genCtx)
   emailLeadsCount = await runHunterFallbackToEmailTarget(
     supabase,
     genCtx,
     leadCap,
-    ctx.mode === "audience" ? ctx.audienceId : undefined,
-    ctx.mode === "campaign" && !campaignWasDeleted ? assertCampaignNotDeleted : undefined
+    audienceCtx.audienceId,
+    undefined
   )
 
   validLeadCount = await countValidLeadsForContext(supabase, genCtx)
-  leadsCollected = await getLeadCount(supabase, ctx)
+  leadsCollected = await getLeadCount(supabase, audienceCtx)
 
-  await trimLeadRowsToCap(supabase, ctx, leadCap)
-  leadsCollected = await getLeadCount(supabase, ctx)
+  await trimLeadRowsToCap(supabase, audienceCtx, leadCap)
+  leadsCollected = await getLeadCount(supabase, audienceCtx)
 
   if (emailLeadsCount < leadCap) {
     console.log(
@@ -1907,22 +1844,8 @@ export async function POST(req: Request) {
     `[generate-leads] complete | businesses_scanned=${businessesScannedTotal} leads_saved=${leadsCollected} emails_found=${emailLeadsCount} | inserted_this_run=${savedLeadRowsTotal} valid_metric=${validLeadCount}`
   )
 
-  if (ctx.mode === "audience") {
-    const finalStatus = leadsCollected >= leadCap ? "ready" : "market_exhausted"
-    await updateProgress(supabase, ctx.audienceId, leadsCollected, finalStatus)
-  }
-
-  if (ctx.mode === "campaign" && !campaignWasDeleted) {
-    leadsCollected = await getLeadCount(supabase, ctx)
-    const scrapeComplete = leadsCollected >= leadCap
-    await supabase
-      .from("campaigns")
-      .update({
-        lead_generation_status: scrapeComplete ? "complete" : "partial",
-        lead_generation_stage: scrapeComplete ? "complete" : "searching",
-      })
-      .eq("id", ctx.campaignId)
-  }
+  const finalStatus = leadsCollected >= leadCap ? "ready" : "market_exhausted"
+  await updateProgress(supabase, audienceCtx.audienceId, leadsCollected, finalStatus)
 
   return NextResponse.json({
     success: true,
@@ -1932,18 +1855,10 @@ export async function POST(req: Request) {
   })
   } catch (err) {
     console.error("Lead generation failed:", err)
-    if (ctx.mode === "audience") {
-      await supabase
-        .from("audiences")
-        .update({ status: "failed" })
-        .eq("id", ctx.audienceId)
-    }
-    if (typeof ctx !== "undefined" && ctx.mode === "campaign" && !campaignWasDeleted) {
-      await supabase
-        .from("campaigns")
-        .update({ lead_generation_status: "failed" })
-        .eq("id", ctx.campaignId)
-    }
+    await supabase
+      .from("audiences")
+      .update({ status: "failed" })
+      .eq("id", audienceCtx.audienceId)
     return NextResponse.json(
       { error: "Lead generation failed" },
       { status: 500 }

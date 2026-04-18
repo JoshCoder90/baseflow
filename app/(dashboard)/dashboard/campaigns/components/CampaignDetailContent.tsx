@@ -18,6 +18,9 @@ import type { CampaignQueueStats } from "@/lib/get-campaign-stats"
 /** `/api/campaign-data` auto-refresh: queue, leads, sending stats (single interval, no overlap with a second poll). */
 const CAMPAIGN_DATA_POLL_MS = 3000
 
+/** Drive serverless Places scraping forward while `lead_generation_status` is generating. */
+const SCRAPE_BATCH_POLL_MS = 2500
+
 type Campaign = {
   id: string
   name?: string | null
@@ -277,6 +280,51 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
     }, CAMPAIGN_DATA_POLL_MS)
     return () => clearInterval(interval)
   }, [campaignId])
+
+  /** Batched Places scrape (Vercel-safe): each call processes a limited chunk until cap or completion. */
+  useEffect(() => {
+    if (!campaignId || !campaign.target_search_query) return
+    if (leadGenStatus !== "generating") return
+
+    let cancelled = false
+
+    async function runScrapeBatch() {
+      if (cancelled) return
+      try {
+        const res = await fetch("/api/scrape-batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ campaign_id: campaignId }),
+        })
+        const data = (await res.json()) as {
+          done?: boolean
+          totalLeadsNow?: number
+          ok?: boolean
+        }
+        void fetchCampaignDataRef.current()
+        if (
+          data.done ||
+          (typeof data.totalLeadsNow === "number" &&
+            data.totalLeadsNow >= MAX_LEADS_PER_CAMPAIGN)
+        ) {
+          cancelled = true
+        }
+      } catch (e) {
+        console.error("scrape-batch:", e)
+      }
+    }
+
+    void runScrapeBatch()
+    const interval = setInterval(() => {
+      if (cancelled) return
+      void runScrapeBatch()
+    }, SCRAPE_BATCH_POLL_MS)
+
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [campaignId, campaign.target_search_query, leadGenStatus])
 
   /** Refresh queue/stats when campaign_messages change (sends complete in background). */
   useEffect(() => {
