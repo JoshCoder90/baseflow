@@ -41,7 +41,7 @@ export async function POST(req: Request) {
   if (!v.ok) return v.response
 
   const campaignId = v.value
-  console.log("Scraping campaign:", campaignId)
+  console.log("SCRAPE BATCH RUNNING", campaignId)
 
   const supabase = createClient(supabaseUrl, supabaseServiceKey)
 
@@ -57,6 +57,20 @@ export async function POST(req: Request) {
 
   if ((campaign as { user_id?: string }).user_id !== sessionUser.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 403 })
+  }
+
+  const campaignStatus = (campaign as { status?: string | null }).status
+  if (campaignStatus === "completed") {
+    return NextResponse.json({ error: "Campaign already completed" }, { status: 400 })
+  }
+
+  /** While scraping, mark non-send lifecycle rows as `running`; never clobber active/sending/paused/stopped. */
+  const preserveWhileScraping = new Set(["active", "sending", "paused", "stopped"])
+  if (
+    campaignStatus !== "running" &&
+    !preserveWhileScraping.has((campaignStatus ?? "").toLowerCase())
+  ) {
+    await supabase.from("campaigns").update({ status: "running" }).eq("id", campaignId)
   }
 
   const daily = await dailyUsageLimitResponseIfExceeded(supabase, sessionUser.id)

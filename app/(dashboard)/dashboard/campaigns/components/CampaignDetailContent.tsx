@@ -19,7 +19,7 @@ import type { CampaignQueueStats } from "@/lib/get-campaign-stats"
 const CAMPAIGN_DATA_POLL_MS = 3000
 
 /** Drive serverless Places scraping forward while `lead_generation_status` is generating. */
-const SCRAPE_BATCH_POLL_MS = 2500
+const SCRAPE_BATCH_POLL_MS = 3000
 
 type Campaign = {
   id: string
@@ -288,13 +288,17 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
 
     let cancelled = false
 
-    async function runScrapeBatch() {
+    const tick = async () => {
       if (cancelled) return
       try {
         const res = await fetch("/api/scrape-batch", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ campaignId: campaign.id }),
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            campaignId: campaign.id,
+          }),
         })
         const data = (await res.json()) as {
           done?: boolean
@@ -314,17 +318,16 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
       }
     }
 
-    void runScrapeBatch()
+    void tick()
     const interval = setInterval(() => {
-      if (cancelled) return
-      void runScrapeBatch()
+      void tick()
     }, SCRAPE_BATCH_POLL_MS)
 
     return () => {
       cancelled = true
       clearInterval(interval)
     }
-  }, [campaignId, campaign.target_search_query, leadGenStatus])
+  }, [campaignId, campaign.target_search_query, leadGenStatus, campaign.id])
 
   /** Refresh queue/stats when campaign_messages change (sends complete in background). */
   useEffect(() => {

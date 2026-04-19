@@ -41,7 +41,7 @@ export function __resetActiveScrapesForTests(): void {
 }
 
 export const RATE_LIMIT = {
-  /** Scrape POST /api/generate-leads — starts only */
+  /** Scrape POST /api/scrape-batch — starts only (legacy generate-leads disabled) */
   scrapeStartPerUserPerMinute: 3,
   /** Inbox AI suggestions — POST /api/generate-reply */
   aiReplyPerUserPerMinute: 15,

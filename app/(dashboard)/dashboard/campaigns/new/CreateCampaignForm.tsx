@@ -81,7 +81,7 @@ export function CreateCampaignForm({ examplePrompts }: Props) {
           location_lng = geoData.lng
         }
       } catch {
-        /* omit coords — generate-leads will forward-geocode */
+        /* omit coords — first scrape-batch pass geocodes via checkpoint init */
       }
 
       const { data: campaign, error: insertError } = await supabase
@@ -110,20 +110,9 @@ export function CreateCampaignForm({ examplePrompts }: Props) {
         return
       }
 
-      // Navigate first so the campaign page can show live progress immediately; scraping runs in parallel.
+      // Navigate first; CampaignDetailContent polls POST /api/scrape-batch while lead_generation_status is generating.
       router.push(`/dashboard/campaigns/${campaign.id}`)
       router.refresh()
-
-      void fetch("/api/generate-leads", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          campaign_id: campaign.id,
-          search_query: trimmedQuery,
-        }),
-      }).catch((err) => {
-        console.error("Lead generation failed to start:", err)
-      })
     } catch (err) {
       console.error("Create campaign error:", err)
       setError(err instanceof Error ? err.message : "Something went wrong")

@@ -516,22 +516,75 @@ export async function runCampaignScrapeBatch(params: {
   const searchQuery = (campaign.target_search_query as string) || ""
   const { niche, location } = await parseSearchQuery(searchQuery)
 
-  const checkpointRaw = campaign.scrape_checkpoint as CampaignScrapeCheckpoint | null
-  if (!checkpointRaw || checkpointRaw.v !== 1) {
-    return {
-      ok: false,
-      error: "Scrape not initialized; call generate-leads first",
-      scrapedThisBatch: 0,
-      totalLeadsNow: await getLeadCount(supabase, campaignId),
-      emailLeadsNow: 0,
-      done: false,
-      leadCap: MAX_LEADS,
-      phase: "needs_init",
-    }
-  }
-  let checkpoint: CampaignScrapeCheckpoint = checkpointRaw
-
   const leadCap = Math.min(MAX_LEADS, SCRAPE_POLICY.maxLeadsPerScrape)
+
+  const latRaw = campaign.location_lat as number | string | null | undefined
+  const lngRaw = campaign.location_lng as number | string | null | undefined
+  const lat = typeof latRaw === "number" ? latRaw : latRaw != null ? Number(latRaw) : NaN
+  const lng = typeof lngRaw === "number" ? lngRaw : lngRaw != null ? Number(lngRaw) : NaN
+  const storedCampaignCoords =
+    Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null
+
+  let checkpoint: CampaignScrapeCheckpoint
+  const checkpointFromDb = campaign.scrape_checkpoint as CampaignScrapeCheckpoint | null
+  if (!checkpointFromDb || checkpointFromDb.v !== 1) {
+    try {
+      const prepared = await prepareCampaignScrapeCheckpoint({
+        supabase,
+        ctx: {
+          campaignId,
+          userId,
+          niche,
+          location,
+          leadCap,
+        },
+        apiKey,
+        storedCampaignCoords,
+      })
+      const { error: cpSaveErr } = await supabase
+        .from("campaigns")
+        .update({
+          scrape_checkpoint: prepared as unknown as Record<string, unknown>,
+          lead_generation_status: "generating",
+          lead_generation_stage: "searching",
+        })
+        .eq("id", campaignId)
+
+      if (cpSaveErr) {
+        console.error("[scrape-batch] checkpoint init save failed:", cpSaveErr)
+        await supabase.from("campaigns").update({ lead_generation_status: "failed" }).eq("id", campaignId)
+        return {
+          ok: false,
+          error: "Could not initialize scrape checkpoint",
+          scrapedThisBatch: 0,
+          totalLeadsNow: await getLeadCount(supabase, campaignId),
+          emailLeadsNow: 0,
+          done: true,
+          leadCap,
+          phase: "init_failed",
+        }
+      }
+      checkpoint = prepared
+    } catch (err) {
+      console.error("[scrape-batch] checkpoint init failed:", err)
+      await supabase.from("campaigns").update({ lead_generation_status: "failed" }).eq("id", campaignId)
+      return {
+        ok: false,
+        error:
+          err instanceof Error
+            ? err.message
+            : "Could not geocode target location. Try a more specific city or region.",
+        scrapedThisBatch: 0,
+        totalLeadsNow: await getLeadCount(supabase, campaignId),
+        emailLeadsNow: 0,
+        done: true,
+        leadCap,
+        phase: "init_failed",
+      }
+    }
+  } else {
+    checkpoint = checkpointFromDb
+  }
   const ctx: CampaignCtx = {
     campaignId,
     userId,
