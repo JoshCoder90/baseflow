@@ -17,6 +17,8 @@ const supabase = createClient(
 
 export async function POST(req: Request) {
   try {
+    console.log("BACKEND SUPABASE URL:", process.env.NEXT_PUBLIC_SUPABASE_URL)
+
     console.log("STEP 1: route hit")
 
     const _ip = heavyRouteIpLimitResponse(req, "scrape-batch")
