@@ -33,7 +33,7 @@ export async function POST(req: Request) {
     }
 
     const { searchParams } = new URL(req.url)
-    const campaignId = searchParams.get("id")
+    const campaignId = searchParams.get("id") || ""
 
     console.log("SCRAPE ROUTE ID:", campaignId)
 
