@@ -2,8 +2,6 @@
 
 import { useState } from "react"
 import { useRouter } from "next/navigation"
-import { supabase } from "@/lib/supabase"
-import { OUTBOUND_EMAIL_CHANNEL } from "@/lib/outbound-channel"
 
 const PLACEHOLDER = "Example: Dental offices in New York that may need an AI assistant"
 const INITIAL_MESSAGE_PLACEHOLDER =
@@ -52,13 +50,6 @@ export function CreateCampaignForm({ examplePrompts }: Props) {
     setGenerating(true)
 
     try {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) {
-        setError("You must be signed in to create a campaign")
-        setGenerating(false)
-        return
-      }
-
       let location_lat: number | undefined
       let location_lng: number | undefined
       try {
@@ -84,34 +75,40 @@ export function CreateCampaignForm({ examplePrompts }: Props) {
         /* omit coords — first scrape-batch pass geocodes via checkpoint init */
       }
 
-      const { data: campaign, error: insertError } = await supabase
-        .from("campaigns")
-        .insert({
-          user_id: user.id,
-          name: trimmedName || "Untitled campaign",
+      const res = await fetch("/api/create-campaign", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: trimmedName || undefined,
           target_search_query: trimmedQuery,
           message_template: trimmedMessage,
-          subject: subject.trim() || "Quick question",
-          status: "draft",
-          channel: OUTBOUND_EMAIL_CHANNEL,
-          lead_generation_status: "generating",
-          lead_generation_stage: "searching",
+          subject: subject.trim() || undefined,
           ...(location_lat !== undefined && location_lng !== undefined
             ? { location_lat, location_lng }
             : {}),
-        })
-        .select("id")
-        .single()
+        }),
+      })
 
-      if (insertError) {
-        console.error("Campaign create error:", insertError)
-        setError(insertError.message ?? "Failed to create campaign")
+      const json = (await res.json()) as {
+        campaign?: { id: string }
+        error?: string
+      }
+
+      if (!res.ok) {
+        setError(json.error ?? "Failed to create campaign")
+        setGenerating(false)
+        return
+      }
+
+      const id = json.campaign?.id
+      if (!id) {
+        setError("Invalid response: missing campaign id")
         setGenerating(false)
         return
       }
 
       // Navigate first; CampaignDetailContent polls POST /api/scrape-batch while lead_generation_status is generating.
-      router.push(`/dashboard/campaigns/${campaign.id}`)
+      router.push(`/dashboard/campaigns/${id}`)
       router.refresh()
     } catch (err) {
       console.error("Create campaign error:", err)
