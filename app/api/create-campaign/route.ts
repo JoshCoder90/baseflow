@@ -31,9 +31,11 @@ export async function POST(req: Request) {
     }
 
     const trimmedName = (body.name ?? "").trim()
+    const name = trimmedName || "Untitled campaign"
     const insertPayload: Record<string, unknown> = {
       user_id: user.id,
-      name: trimmedName || "Untitled campaign",
+      name,
+      target_audience: trimmedQuery,
       target_search_query: trimmedQuery,
       message_template: trimmedMessage,
       subject: (body.subject ?? "").trim() || "Quick question",
@@ -64,7 +66,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: error.message }, { status: 400 })
     }
 
-    return NextResponse.json({ campaign: data })
+    return Response.json({ campaign: data })
   } catch (e) {
     console.error("create-campaign:", e)
     return NextResponse.json(

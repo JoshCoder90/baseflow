@@ -100,15 +100,15 @@ export function CreateCampaignForm({ examplePrompts }: Props) {
         return
       }
 
-      const id = json.campaign?.id
-      if (!id) {
+      console.log("CREATED CAMPAIGN:", json.campaign)
+
+      if (!json.campaign?.id) {
         setError("Invalid response: missing campaign id")
         setGenerating(false)
         return
       }
 
-      // Navigate first; CampaignDetailContent polls POST /api/scrape-batch while lead_generation_status is generating.
-      router.push(`/dashboard/campaigns/${id}`)
+      router.push(`/dashboard/campaigns/${json.campaign.id}`)
       router.refresh()
     } catch (err) {
       console.error("Create campaign error:", err)
