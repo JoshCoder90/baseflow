@@ -43,7 +43,9 @@ export async function POST(req: Request) {
     const campaignId = v.value
     console.log("Using campaignId:", campaignId)
 
+    /** Service role bypasses RLS — required to read `campaigns` reliably in this route (not anon). */
     const supabase = createClient(supabaseUrl, supabaseServiceKey)
+    console.log("Using service role key")
 
     const allCampaigns = await supabase.from("campaigns").select("*")
     console.log("All campaigns:", allCampaigns.data)
