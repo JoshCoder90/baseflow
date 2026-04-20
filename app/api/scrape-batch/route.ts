@@ -41,11 +41,13 @@ export async function POST(req: Request) {
     if (!v.ok) return v.response
 
     const campaignId = v.value
+    console.log("SCRAPE CAMPAIGN ID:", campaignId)
     console.log("Using campaignId:", campaignId)
 
-    /** Service role bypasses RLS — required to read `campaigns` reliably in this route (not anon). */
-    const supabase = createClient(supabaseUrl, supabaseServiceKey)
-    console.log("Using service role key")
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_KEY!
+    )
 
     const allCampaigns = await supabase.from("campaigns").select("*")
     console.log("All campaigns:", allCampaigns.data)
@@ -55,11 +57,15 @@ export async function POST(req: Request) {
 
     console.log("STEP 6: fetching campaign by id")
 
+    console.log("QUERYING CAMPAIGN...")
+
     const { data: campaign, error: campaignFetchErr } = await supabase
       .from("campaigns")
       .select("*")
       .eq("id", campaignId)
       .maybeSingle()
+
+    console.log("CAMPAIGN RESULT:", campaign)
 
     console.log("STEP 7: campaign result", { campaign, campaignFetchErr })
 
@@ -72,6 +78,7 @@ export async function POST(req: Request) {
     }
 
     if (!campaign) {
+      console.log("CAMPAIGN NOT FOUND IN DB")
       console.error("Campaign not found for ID:", campaignId)
       return NextResponse.json(
         {
