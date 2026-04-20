@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server"
 import { createClient } from "@supabase/supabase-js"
 import { createClient as createServerClient } from "@/lib/supabase/server"
-import { validateUuid } from "@/lib/api-input-validation"
 import { heavyRouteIpLimitResponse } from "@/lib/ip-rate-limit"
 import { dailyUsageLimitResponseIfExceeded } from "@/lib/daily-usage-limit"
 import { runCampaignScrapeBatch } from "@/lib/campaign-scrape-engine"
@@ -34,19 +33,9 @@ export async function POST(req: Request) {
     }
 
     const { searchParams } = new URL(req.url)
-    const rawCampaignId = searchParams.get("id")
-    console.log("STEP 3: id query param", rawCampaignId)
+    const campaignId = searchParams.get("id")
 
-    if (!rawCampaignId) {
-      return NextResponse.json({ error: "Missing id" }, { status: 400 })
-    }
-
-    const v = validateUuid(rawCampaignId, "campaignId")
-    if (!v.ok) return v.response
-
-    const campaignId = v.value
-    console.log("CAMPAIGN ID FROM FRONTEND:", campaignId)
-    console.log("Using campaignId:", campaignId)
+    console.log("SCRAPE ROUTE ID:", campaignId)
 
     const allCampaigns = await supabase.from("campaigns").select("*")
     console.log("All campaigns:", allCampaigns.data)
