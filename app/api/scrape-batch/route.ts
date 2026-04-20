@@ -45,6 +45,7 @@ export async function POST(req: Request) {
     if (!v.ok) return v.response
 
     const campaignId = v.value
+    console.log("CAMPAIGN ID FROM FRONTEND:", campaignId)
     console.log("Using campaignId:", campaignId)
 
     const allCampaigns = await supabase.from("campaigns").select("*")
@@ -56,6 +57,8 @@ export async function POST(req: Request) {
     console.log("STEP 6: fetching campaign by id")
 
     console.log("SCRAPE CAMPAIGN ID:", campaignId)
+
+    console.log("QUERYING FOR ID:", campaignId)
 
     const { data: campaign, error } = await supabase
       .from('campaigns')
