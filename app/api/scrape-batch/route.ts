@@ -6,12 +6,14 @@ import { heavyRouteIpLimitResponse } from "@/lib/ip-rate-limit"
 import { dailyUsageLimitResponseIfExceeded } from "@/lib/daily-usage-limit"
 import { runCampaignScrapeBatch } from "@/lib/campaign-scrape-engine"
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY || ""
-
-if (!supabaseServiceKey) {
+if (!process.env.SUPABASE_SERVICE_KEY) {
   throw new Error("SUPABASE_SERVICE_KEY missing from env")
 }
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_KEY!
+)
 
 export async function POST(req: Request) {
   try {
@@ -41,13 +43,7 @@ export async function POST(req: Request) {
     if (!v.ok) return v.response
 
     const campaignId = v.value
-    console.log("SCRAPE CAMPAIGN ID:", campaignId)
     console.log("Using campaignId:", campaignId)
-
-    const supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_KEY!
-    )
 
     const allCampaigns = await supabase.from("campaigns").select("*")
     console.log("All campaigns:", allCampaigns.data)
@@ -57,37 +53,31 @@ export async function POST(req: Request) {
 
     console.log("STEP 6: fetching campaign by id")
 
-    console.log("QUERYING CAMPAIGN...")
+    console.log("SCRAPE CAMPAIGN ID:", campaignId)
 
-    const { data: campaign, error: campaignFetchErr } = await supabase
-      .from("campaigns")
-      .select("*")
-      .eq("id", campaignId)
+    const { data: campaign, error } = await supabase
+      .from('campaigns')
+      .select('*')
+      .eq('id', campaignId)
       .maybeSingle()
 
     console.log("CAMPAIGN RESULT:", campaign)
+    console.log("CAMPAIGN ERROR:", error)
 
-    console.log("STEP 7: campaign result", { campaign, campaignFetchErr })
-
-    if (campaignFetchErr) {
-      console.error("Campaign fetch error:", campaignFetchErr)
+    if (error) {
+      console.error("Campaign fetch error:", error)
       return NextResponse.json(
-        { ok: false, error: campaignFetchErr.message, campaignId },
+        { ok: false, error: error.message, campaignId },
         { status: 400 }
       )
     }
 
     if (!campaign) {
-      console.log("CAMPAIGN NOT FOUND IN DB")
-      console.error("Campaign not found for ID:", campaignId)
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "Campaign not found",
-          campaignId,
-        },
-        { status: 400 }
-      )
+      return Response.json({
+        ok: false,
+        error: "Campaign not found",
+        debugCampaignId: campaignId,
+      })
     }
 
     if ((campaign as { user_id?: string }).user_id !== sessionUser.id) {
