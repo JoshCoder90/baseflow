@@ -281,53 +281,37 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
     return () => clearInterval(interval)
   }, [campaignId])
 
-  /** Batched Places scrape (Vercel-safe): each call processes a limited chunk until cap or completion. */
+  /**
+   * Batched Places scrape (Vercel-safe): POST on mount + every 3s while this page is open.
+   * Must not depend on `lead_generation_status` or `target_search_query` — those gate caused
+   * scrape-batch to never fire when SSR/poll state disagreed.
+   */
   useEffect(() => {
-    if (!campaignId || !campaign.target_search_query) return
-    if (leadGenStatus !== "generating") return
+    if (!campaign?.id) return
 
-    let cancelled = false
+    console.log("STARTING SCRAPE POLLING", campaign.id)
 
-    const tick = async () => {
-      if (cancelled) return
-      try {
-        const res = await fetch("/api/scrape-batch", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            campaignId: campaign.id,
-          }),
+    const postScrape = () => {
+      fetch("/api/scrape-batch", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ campaignId: campaign.id }),
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          console.log("SCRAPE RESPONSE:", data)
+          void fetchCampaignDataRef.current()
         })
-        const data = (await res.json()) as {
-          done?: boolean
-          totalLeadsNow?: number
-          ok?: boolean
-        }
-        void fetchCampaignDataRef.current()
-        if (
-          data.done ||
-          (typeof data.totalLeadsNow === "number" &&
-            data.totalLeadsNow >= MAX_LEADS_PER_CAMPAIGN)
-        ) {
-          cancelled = true
-        }
-      } catch (e) {
-        console.error("scrape-batch:", e)
-      }
+        .catch((err) => console.error("SCRAPE ERROR:", err))
     }
 
-    void tick()
-    const interval = setInterval(() => {
-      void tick()
-    }, SCRAPE_BATCH_POLL_MS)
+    void postScrape()
+    const interval = setInterval(postScrape, SCRAPE_BATCH_POLL_MS)
 
-    return () => {
-      cancelled = true
-      clearInterval(interval)
-    }
-  }, [campaignId, campaign.target_search_query, leadGenStatus, campaign.id])
+    return () => clearInterval(interval)
+  }, [campaign?.id])
 
   /** Refresh queue/stats when campaign_messages change (sends complete in background). */
   useEffect(() => {
