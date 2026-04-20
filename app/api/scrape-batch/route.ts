@@ -29,21 +29,19 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
-    const body = (await req.json()) as { campaignId?: string; campaign_id?: string }
-    console.log("STEP 3: body parsed", body)
-
-    const rawCampaignId = body.campaignId ?? body.campaign_id
-    console.log("STEP 4: campaignId raw", rawCampaignId)
+    const { searchParams } = new URL(req.url)
+    const rawCampaignId = searchParams.get("id")
+    console.log("STEP 3: id query param", rawCampaignId)
 
     if (!rawCampaignId) {
-      return NextResponse.json({ error: "Missing campaignId" }, { status: 400 })
+      return NextResponse.json({ error: "Missing id" }, { status: 400 })
     }
 
     const v = validateUuid(rawCampaignId, "campaignId")
     if (!v.ok) return v.response
 
     const campaignId = v.value
-    console.log("Incoming campaignId:", campaignId)
+    console.log("Using campaignId:", campaignId)
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey)
 

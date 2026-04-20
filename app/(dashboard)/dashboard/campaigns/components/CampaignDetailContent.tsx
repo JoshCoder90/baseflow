@@ -292,12 +292,8 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
     console.log("STARTING SCRAPE POLLING", campaign.id)
 
     const postScrape = () => {
-      fetch("/api/scrape-batch", {
+      fetch(`/api/scrape-batch?id=${encodeURIComponent(campaign.id)}`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ campaignId: campaign.id }),
       })
         .then((res) => res.json())
         .then((data) => {
