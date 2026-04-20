@@ -43,22 +43,44 @@ export async function POST(req: Request) {
     if (!v.ok) return v.response
 
     const campaignId = v.value
-    console.log("STEP 5: campaignId", campaignId)
-
-    console.log("STEP 6: fetching campaign")
+    console.log("Incoming campaignId:", campaignId)
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey)
+
+    const allCampaigns = await supabase.from("campaigns").select("*")
+    console.log("All campaigns:", allCampaigns.data)
+    if (allCampaigns.error) {
+      console.error("All campaigns query error:", allCampaigns.error)
+    }
+
+    console.log("STEP 6: fetching campaign by id")
 
     const { data: campaign, error: campaignFetchErr } = await supabase
       .from("campaigns")
       .select("*")
       .eq("id", campaignId)
-      .single()
+      .maybeSingle()
 
     console.log("STEP 7: campaign result", { campaign, campaignFetchErr })
 
-    if (campaignFetchErr || !campaign) {
-      return NextResponse.json({ error: "Campaign not found" }, { status: 404 })
+    if (campaignFetchErr) {
+      console.error("Campaign fetch error:", campaignFetchErr)
+      return NextResponse.json(
+        { ok: false, error: campaignFetchErr.message, campaignId },
+        { status: 400 }
+      )
+    }
+
+    if (!campaign) {
+      console.error("Campaign not found for ID:", campaignId)
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "Campaign not found",
+          campaignId,
+        },
+        { status: 400 }
+      )
     }
 
     if ((campaign as { user_id?: string }).user_id !== sessionUser.id) {
