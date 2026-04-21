@@ -15,8 +15,6 @@ const supabase = createClient(
 )
 
 export async function POST(req: Request) {
-  throw new Error("SCRAPE ROUTE HIT")
-
   try {
     console.log("BACKEND SUPABASE URL:", process.env.NEXT_PUBLIC_SUPABASE_URL)
 
@@ -71,11 +69,10 @@ export async function POST(req: Request) {
     }
 
     if (!campaign) {
-      return Response.json({
-        ok: false,
-        error: "Campaign not found",
-        debugCampaignId: campaignId,
-      })
+      return NextResponse.json(
+        { ok: false, error: "Campaign not found" },
+        { status: 404 }
+      )
     }
 
     if ((campaign as { user_id?: string }).user_id !== sessionUser.id) {
