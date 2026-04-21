@@ -35,7 +35,19 @@ export async function POST(req: Request) {
     }
 
     const { searchParams } = new URL(req.url)
-    const campaignId = searchParams.get("id")
+
+    const rawCampaignId = searchParams.get("id")
+
+    if (!rawCampaignId) {
+      console.error("NO CAMPAIGN ID PROVIDED")
+      return NextResponse.json(
+        { ok: false, error: "Missing campaignId" },
+        { status: 400 }
+      )
+    }
+
+    // Ensure TypeScript knows this is a string
+    const campaignId = rawCampaignId
 
     console.log("CAMPAIGN ID:", campaignId)
 
