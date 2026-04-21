@@ -73,6 +73,10 @@ export async function POST(req: Request) {
       .eq('id', campaignId)
       .maybeSingle()
 
+    console.log("CAMPAIGN ID USED:", campaignId)
+    console.log("SUPABASE RESULT:", campaign)
+    console.log("SUPABASE ERROR:", error)
+
     console.log("CAMPAIGN RESULT:", campaign)
     console.log("CAMPAIGN ERROR:", error)
 
