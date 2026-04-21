@@ -1,11 +1,13 @@
 "use client"
 
+import type { ReactNode } from "react"
+
 type Props = {
   current: number
   target: number
   /** When set, bar width uses this (same source as lead counts). */
   progressPercent?: number
-  statusMessage?: string | null
+  statusMessage?: ReactNode | null
 }
 
 export function ScrapingProgressBar({ current, target, progressPercent, statusMessage }: Props) {
@@ -27,8 +29,14 @@ export function ScrapingProgressBar({ current, target, progressPercent, statusMe
           style={{ width: `${progress}%`, transition: "width 0.3s ease" }}
         />
       </div>
-      {statusMessage && (
-        <p className="mt-2 text-sm text-zinc-500">{statusMessage}</p>
+      {statusMessage != null && statusMessage !== "" && (
+        <div className="mt-2">
+          {typeof statusMessage === "string" ? (
+            <p className="text-sm text-zinc-500">{statusMessage}</p>
+          ) : (
+            statusMessage
+          )}
+        </div>
       )}
     </div>
   )

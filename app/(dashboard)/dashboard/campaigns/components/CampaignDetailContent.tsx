@@ -617,7 +617,16 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
                 ? leadGenStage === "expanding"
                   ? "Expanding search to nearby areas..."
                   : leadsFound === 0
-                    ? "Finding businesses and leads..."
+                    ? (
+                        <div className="flex items-center gap-2 text-sm text-gray-400">
+                          <span>Finding businesses and leads</span>
+                          <div className="flex gap-1">
+                            <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:0ms]" />
+                            <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:150ms]" />
+                            <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:300ms]" />
+                          </div>
+                        </div>
+                      )
                     : `Found ${leadsFound} leads...`
                 : missingEmailCount > 0
                   ? "Finding email addresses for remaining leads..."
