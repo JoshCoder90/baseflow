@@ -309,6 +309,7 @@ export async function prepareCampaignScrapeCheckpoint(params: {
       location_lng: primaryTarget.lng,
     })
     .eq("id", ctx.campaignId)
+    .eq("user_id", ctx.userId)
 
   const aiExtraAreas = await expandLocationsWithAI(location, niche)
   const searchAreaStrings = mergeSearchAreaStringLists(
@@ -478,16 +479,43 @@ export async function runCampaignScrapeBatch(params: {
   const { supabase, campaignId, userId, apiKey } = params
   const insertBudget = params.insertBudget ?? SCRAPE_BATCH_INSERT_BUDGET
 
+  console.log("[batch] campaignId:", campaignId)
+
   const { data: campaign, error: cErr } = await supabase
     .from("campaigns")
     .select(
       "id, user_id, target_search_query, lead_generation_status, scrape_checkpoint, location_lat, location_lng"
     )
     .eq("id", campaignId)
-    .single()
+    .eq("user_id", userId)
+    .maybeSingle()
 
-  if (cErr || !campaign) {
-    return { ok: false, error: "Campaign not found", scrapedThisBatch: 0, totalLeadsNow: 0, emailLeadsNow: 0, done: true, leadCap: MAX_LEADS, phase: "error" }
+  if (cErr) {
+    console.error("[batch] campaign fetch error:", cErr.message)
+    return {
+      ok: false,
+      error: "Campaign not found",
+      scrapedThisBatch: 0,
+      totalLeadsNow: 0,
+      emailLeadsNow: 0,
+      done: true,
+      leadCap: MAX_LEADS,
+      phase: "error",
+    }
+  }
+
+  if (!campaign) {
+    console.warn("[batch] campaign row missing (RLS or wrong id/user)")
+    return {
+      ok: false,
+      error: "Campaign not found",
+      scrapedThisBatch: 0,
+      totalLeadsNow: 0,
+      emailLeadsNow: 0,
+      done: true,
+      leadCap: MAX_LEADS,
+      phase: "error",
+    }
   }
 
   if ((campaign.user_id as string) !== userId) {
@@ -549,10 +577,15 @@ export async function runCampaignScrapeBatch(params: {
           lead_generation_stage: "searching",
         })
         .eq("id", campaignId)
+        .eq("user_id", userId)
 
       if (cpSaveErr) {
         console.error("[scrape-batch] checkpoint init save failed:", cpSaveErr)
-        await supabase.from("campaigns").update({ lead_generation_status: "failed" }).eq("id", campaignId)
+        await supabase
+          .from("campaigns")
+          .update({ lead_generation_status: "failed" })
+          .eq("id", campaignId)
+          .eq("user_id", userId)
         return {
           ok: false,
           error: "Could not initialize scrape checkpoint",
@@ -567,7 +600,11 @@ export async function runCampaignScrapeBatch(params: {
       checkpoint = prepared
     } catch (err) {
       console.error("[scrape-batch] checkpoint init failed:", err)
-      await supabase.from("campaigns").update({ lead_generation_status: "failed" }).eq("id", campaignId)
+      await supabase
+        .from("campaigns")
+        .update({ lead_generation_status: "failed" })
+        .eq("id", campaignId)
+        .eq("user_id", userId)
       return {
         ok: false,
         error:
@@ -596,7 +633,12 @@ export async function runCampaignScrapeBatch(params: {
   const genCtx: GenCtx = { mode: "campaign", campaignId }
 
   async function assertCampaignExists(): Promise<boolean> {
-    const { data } = await supabase.from("campaigns").select("id").eq("id", campaignId).single()
+    const { data } = await supabase
+      .from("campaigns")
+      .select("id")
+      .eq("id", campaignId)
+      .eq("user_id", userId)
+      .maybeSingle()
     return !!data
   }
 
@@ -904,6 +946,7 @@ export async function runCampaignScrapeBatch(params: {
             checkpoint.wave === 1 ? "searching" : appendedGeoCenter ? "expanding" : "searching",
         })
         .eq("id", campaignId)
+        .eq("user_id", userId)
 
       outer: while (
         checkpoint.pi < checkpoint.searchPoints.length &&
@@ -1095,6 +1138,7 @@ export async function runCampaignScrapeBatch(params: {
       .from("campaigns")
       .update({ lead_generation_stage: "searching" })
       .eq("id", campaignId)
+      .eq("user_id", userId)
 
     textOuter: for (; checkpoint.textRi < TEXT_SEARCH_BIAS_RADII_M.length; checkpoint.textRi++) {
       const radiusBias = TEXT_SEARCH_BIAS_RADII_M[checkpoint.textRi]
@@ -1208,6 +1252,7 @@ export async function runCampaignScrapeBatch(params: {
       .from("campaigns")
       .update({ lead_generation_stage: "enriching" })
       .eq("id", campaignId)
+      .eq("user_id", userId)
 
     const { data: rows } = await supabase
       .from("leads")
@@ -1291,6 +1336,7 @@ export async function runCampaignScrapeBatch(params: {
         scrape_checkpoint: null,
       })
       .eq("id", campaignId)
+      .eq("user_id", userId)
 
     checkpoint.postPhase = "done"
 
@@ -1313,7 +1359,11 @@ export async function runCampaignScrapeBatch(params: {
   totalLeadsNow = await getLeadCount(supabase, campaignId)
   emailLeadsNow = await countEmailLeadsForContext(supabase, genCtx)
 
-  await supabase.from("campaigns").update({ scrape_checkpoint: checkpoint }).eq("id", campaignId)
+  await supabase
+    .from("campaigns")
+    .update({ scrape_checkpoint: checkpoint })
+    .eq("id", campaignId)
+    .eq("user_id", userId)
 
   const done = checkpoint.postPhase === "done"
 

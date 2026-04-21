@@ -1,91 +1,70 @@
+/**
+ * Campaign lead scraping only (Places → enrich → `leads`). No Gmail API, no sync-gmail-replies,
+ * no token refresh. Inbound mail sync remains POST /api/sync-gmail-replies only.
+ *
+ * Places HTTP calls happen inside `runCampaignScrapeBatch` (`lib/campaign-scrape-engine.ts`).
+ */
 import { NextResponse } from "next/server"
-import { createClient } from "@supabase/supabase-js"
 import { createClient as createServerClient } from "@/lib/supabase/server"
 import { heavyRouteIpLimitResponse } from "@/lib/ip-rate-limit"
-import { dailyUsageLimitResponseIfExceeded } from "@/lib/daily-usage-limit"
 import { runCampaignScrapeBatch } from "@/lib/campaign-scrape-engine"
 
-if (!process.env.SUPABASE_SERVICE_KEY) {
-  throw new Error("SUPABASE_SERVICE_KEY missing from env")
-}
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY!
-)
-
-console.log("SUPABASE URL (BACKEND):", process.env.NEXT_PUBLIC_SUPABASE_URL)
-
 export async function POST(req: Request) {
-  console.log("SCRAPE ROUTE HIT")
-
   try {
-    console.log("BACKEND SUPABASE URL:", process.env.NEXT_PUBLIC_SUPABASE_URL)
-
-    console.log("STEP 1: route hit")
+    console.log("[scrape-batch] start")
 
     const _ip = heavyRouteIpLimitResponse(req, "scrape-batch")
     if (_ip) return _ip
 
-    console.log("STEP 2: loading session")
-    const auth = await createServerClient()
+    const supabase = await createServerClient()
+
     const {
       data: { user: sessionUser },
-    } = await auth.auth.getUser()
+      error: authError,
+    } = await supabase.auth.getUser()
+
+    console.log("[scrape-batch] user id:", sessionUser?.id ?? "(none)")
+    console.log("[scrape-batch] auth error:", authError?.message ?? "(none)")
+
     if (!sessionUser?.id) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+      return NextResponse.json(
+        { ok: false, error: "Not authenticated" },
+        { status: 401 }
+      )
     }
 
     const { searchParams } = new URL(req.url)
-
     const rawCampaignId = searchParams.get("id")
 
     if (!rawCampaignId) {
-      console.error("NO CAMPAIGN ID PROVIDED")
       return NextResponse.json(
         { ok: false, error: "Missing campaignId" },
         { status: 400 }
       )
     }
 
-    // Ensure TypeScript knows this is a string
     const campaignId = rawCampaignId
+    console.log("[scrape-batch] campaignId:", campaignId)
 
-    console.log("CAMPAIGN ID:", campaignId)
-
-    const allCampaigns = await supabase.from("campaigns").select("*")
-    console.log("All campaigns:", allCampaigns.data)
-    if (allCampaigns.error) {
-      console.error("All campaigns query error:", allCampaigns.error)
-    }
-
-    console.log("STEP 6: fetching campaign by id")
-
-    console.log("SCRAPE CAMPAIGN ID:", campaignId)
-
-    console.log("QUERYING FOR ID:", campaignId)
-
-    console.log("SUPABASE URL (backend):", process.env.NEXT_PUBLIC_SUPABASE_URL)
-
-    console.log("QUERYING DB FOR:", campaignId)
-
-    const { data: campaign, error } = await supabase
-      .from('campaigns')
-      .select('*')
-      .eq('id', campaignId)
+    const { data: campaign, error: campaignQueryError } = await supabase
+      .from("campaigns")
+      .select("*")
+      .eq("id", campaignId)
+      .eq("user_id", sessionUser.id)
       .maybeSingle()
 
-    console.log("CAMPAIGN ID USED:", campaignId)
-    console.log("SUPABASE RESULT:", campaign)
-    console.log("SUPABASE ERROR:", error)
+    console.log(
+      "[scrape-batch] campaign query result:",
+      campaign ? { id: (campaign as { id: string }).id } : null
+    )
+    console.log(
+      "[scrape-batch] campaign query error:",
+      campaignQueryError?.message ?? "(none)"
+    )
 
-    console.log("CAMPAIGN RESULT:", campaign)
-    console.log("CAMPAIGN ERROR:", error)
-
-    if (error) {
-      console.error("Campaign fetch error:", error)
+    if (campaignQueryError) {
       return NextResponse.json(
-        { ok: false, error: error.message, campaignId },
+        { ok: false, error: campaignQueryError.message, campaignId },
         { status: 400 }
       )
     }
@@ -97,55 +76,150 @@ export async function POST(req: Request) {
       )
     }
 
-    if ((campaign as { user_id?: string }).user_id !== sessionUser.id) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 403 })
+    console.log("[scrape-batch] STEP 1 - campaign loaded")
+
+    console.log("[scrape-batch] STEP 2 - starting scrape")
+
+    console.log("[scrape] STEP 2 - starting real scrape")
+
+    console.log("[scrape] STEP 2.1 - building context")
+    const targetSearchQuery =
+      (campaign as { target_search_query?: string | null }).target_search_query ?? ""
+    const locationLat = (campaign as { location_lat?: unknown }).location_lat
+    const locationLng = (campaign as { location_lng?: unknown }).location_lng
+    const leadGenStatus = (campaign as { lead_generation_status?: string | null })
+      .lead_generation_status
+
+    console.log("[scrape] query:", targetSearchQuery)
+    console.log("[scrape] location:", { lat: locationLat, lng: locationLng })
+    console.log("[scrape] lead_generation_status:", leadGenStatus)
+
+    try {
+      const campaignStatus = (campaign as { status?: string | null }).status
+      console.log("[scrape] campaign.status:", campaignStatus)
+
+      if (campaignStatus === "completed") {
+        console.log("[scrape] early exit: campaign already completed")
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "Campaign already completed",
+            debug: { campaignId, reason: "campaign_completed" },
+          },
+          { status: 400 }
+        )
+      }
+
+      console.log("[scrape] STEP 2.1b - optional campaigns.status → running")
+      const preserveWhileScraping = new Set(["active", "sending", "paused", "stopped"])
+      if (
+        campaignStatus !== "running" &&
+        !preserveWhileScraping.has((campaignStatus ?? "").toLowerCase())
+      ) {
+        const { error: runUpdErr } = await supabase
+          .from("campaigns")
+          .update({ status: "running" })
+          .eq("id", campaignId)
+          .eq("user_id", sessionUser.id)
+
+        console.log("[scrape] status→running update error:", runUpdErr?.message ?? "(none)")
+      }
+
+      console.log("[scrape] STEP 2.2 - resolving GOOGLE_PLACES_API_KEY")
+      const apiKey = process.env.GOOGLE_PLACES_API_KEY
+      console.log(
+        "[scrape] GOOGLE_PLACES_API_KEY:",
+        apiKey ? `(present, length=${apiKey.length})` : "(missing)"
+      )
+
+      if (!apiKey) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "Google Places API key missing",
+            debug: { envKey: "GOOGLE_PLACES_API_KEY", campaignId },
+          },
+          { status: 500 }
+        )
+      }
+
+      console.log(
+        "[scrape] STEP 2.3 - calling runCampaignScrapeBatch (Places + enrichment live in lib)"
+      )
+
+      const result = await runCampaignScrapeBatch({
+        supabase,
+        campaignId,
+        userId: sessionUser.id,
+        apiKey,
+      })
+
+      console.log("[scrape] STEP 2.4 - batch result:", JSON.stringify(result))
+
+      if (!result.ok && result.error) {
+        console.warn(
+          "[scrape] batch ok=false:",
+          "error=",
+          result.error,
+          "phase=",
+          result.phase,
+          "scrapedThisBatch=",
+          result.scrapedThisBatch
+        )
+      }
+
+      if (
+        result.ok &&
+        result.scrapedThisBatch === 0 &&
+        result.totalLeadsNow === 0 &&
+        !result.skipped
+      ) {
+        console.warn(
+          "[scrape] ZERO leads after batch — check geocode/query, Places quota, checkpoint phase:",
+          result.phase,
+          "(see also [scrape-batch] / campaign-scrape-engine logs)"
+        )
+      }
+
+      const debugPayload = {
+        campaignId,
+        targetSearchQuery,
+        phase: result.phase,
+        scrapedThisBatch: result.scrapedThisBatch,
+        totalLeadsNow: result.totalLeadsNow,
+        emailLeadsNow: result.emailLeadsNow,
+        done: result.done,
+        skipped: result.skipped ?? false,
+      }
+
+      if (!result.ok && result.error && result.phase === "needs_init") {
+        return NextResponse.json({ ...result, debug: debugPayload }, { status: 400 })
+      }
+      if (!result.ok && result.error) {
+        return NextResponse.json(
+          { ...result, debug: debugPayload },
+          { status: result.error === "Unauthorized" ? 403 : 400 }
+        )
+      }
+
+      console.log("[scrape-batch] STEP 3 - scrape finished")
+
+      return NextResponse.json({
+        ...result,
+        debug: debugPayload,
+      })
+    } catch (e) {
+      console.error("[scrape] CRASH:", e)
+
+      return NextResponse.json(
+        { ok: false, error: "SCRAPE FAILED", details: String(e) },
+        { status: 500 }
+      )
     }
-
-    const campaignStatus = (campaign as { status?: string | null }).status
-    if (campaignStatus === "completed") {
-      return NextResponse.json({ error: "Campaign already completed" }, { status: 400 })
-    }
-
-    /** While scraping, mark non-send lifecycle rows as `running`; never clobber active/sending/paused/stopped. */
-    const preserveWhileScraping = new Set(["active", "sending", "paused", "stopped"])
-    if (
-      campaignStatus !== "running" &&
-      !preserveWhileScraping.has((campaignStatus ?? "").toLowerCase())
-    ) {
-      await supabase.from("campaigns").update({ status: "running" }).eq("id", campaignId)
-    }
-
-    const daily = await dailyUsageLimitResponseIfExceeded(supabase, sessionUser.id)
-    if (daily) return daily
-
-    const apiKey = process.env.GOOGLE_PLACES_API_KEY
-    if (!apiKey) {
-      return NextResponse.json({ error: "Google Places API key missing" }, { status: 500 })
-    }
-
-    console.log("STEP 8: calling Google API / scrape batch")
-
-    const result = await runCampaignScrapeBatch({
-      supabase,
-      campaignId,
-      userId: sessionUser.id,
-      apiKey,
-    })
-
-    console.log("STEP 9: scrape batch complete (Google + inserts)", result)
-
-    if (!result.ok && result.error && result.phase === "needs_init") {
-      return NextResponse.json(result, { status: 400 })
-    }
-    if (!result.ok && result.error) {
-      return NextResponse.json(result, { status: result.error === "Unauthorized" ? 403 : 400 })
-    }
-
-    return NextResponse.json(result)
   } catch (error: unknown) {
     const err = error instanceof Error ? error : new Error(String(error))
-    console.error("❌ FULL ERROR:", err)
-    console.error("❌ STACK:", err.stack)
+    console.error("[scrape-batch] exception:", err.message)
+    console.error("[scrape-batch] stack:", err.stack)
 
     return NextResponse.json(
       {
