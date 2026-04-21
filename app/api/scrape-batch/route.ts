@@ -35,11 +35,9 @@ export async function POST(req: Request) {
     }
 
     const { searchParams } = new URL(req.url)
-    const campaignId = searchParams.get("id") || ""
+    const campaignId = searchParams.get("id")
 
-    console.log("CAMPAIGN ID FROM REQUEST:", campaignId)
-
-    console.log("SCRAPE ROUTE ID:", campaignId)
+    console.log("CAMPAIGN ID:", campaignId)
 
     const allCampaigns = await supabase.from("campaigns").select("*")
     console.log("All campaigns:", allCampaigns.data)
