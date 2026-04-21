@@ -49,6 +49,8 @@ export async function POST(req: Request) {
 
     console.log("QUERYING FOR ID:", campaignId)
 
+    console.log("SUPABASE URL (backend):", process.env.NEXT_PUBLIC_SUPABASE_URL)
+
     const { data: campaign, error } = await supabase
       .from('campaigns')
       .select('*')
