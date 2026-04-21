@@ -14,6 +14,8 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY!
 )
 
+console.log("SUPABASE URL (BACKEND):", process.env.NEXT_PUBLIC_SUPABASE_URL)
+
 export async function POST(req: Request) {
   console.log("SCRAPE ROUTE HIT")
 
