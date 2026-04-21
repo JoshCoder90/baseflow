@@ -15,6 +15,8 @@ const supabase = createClient(
 )
 
 export async function POST(req: Request) {
+  console.log("SCRAPE ROUTE HIT")
+
   try {
     console.log("BACKEND SUPABASE URL:", process.env.NEXT_PUBLIC_SUPABASE_URL)
 
@@ -35,6 +37,8 @@ export async function POST(req: Request) {
     const { searchParams } = new URL(req.url)
     const campaignId = searchParams.get("id") || ""
 
+    console.log("CAMPAIGN ID FROM REQUEST:", campaignId)
+
     console.log("SCRAPE ROUTE ID:", campaignId)
 
     const allCampaigns = await supabase.from("campaigns").select("*")
@@ -50,6 +54,8 @@ export async function POST(req: Request) {
     console.log("QUERYING FOR ID:", campaignId)
 
     console.log("SUPABASE URL (backend):", process.env.NEXT_PUBLIC_SUPABASE_URL)
+
+    console.log("QUERYING DB FOR:", campaignId)
 
     const { data: campaign, error } = await supabase
       .from('campaigns')
