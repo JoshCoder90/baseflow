@@ -403,7 +403,7 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
           console.log("SCRAPING COMPLETE - STOPPING LOOP")
           break
         }
-        await new Promise((r) => setTimeout(r, 1000))
+        await new Promise((r) => setTimeout(r, 200))
       }
     }
 

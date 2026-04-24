@@ -35,11 +35,10 @@ const MAX_LEADS = SCRAPE_POLICY.maxLeadsPerScrape
 const RADIUS_STEPS = [5000, 10000, 20000, 50000]
 /** Legacy Nearby Search returns a fixed payload shape; field masks are not supported on this endpoint. */
 const MAX_RADIUS_STEPS = 3
-const MAX_PLACE_PAGES_PER_SEARCH = 3
+const MAX_PLACE_PAGES_PER_SEARCH = 5
 const PAGE_TOKEN_DELAY_MS = 1500
 const MAX_GOOGLE_API_CALLS_PER_CAMPAIGN = 300
 const BATCH_SIZE = 15
-const SCRAPER_CHUNK_DELAY_MS = 150
 const SMART_STOP_MAX_BUSINESSES_SCANNED = 4000
 const MAX_RAW_BUSINESSES = 2500
 const MAX_CONSECUTIVE_EMPTY_WAVES = 3
@@ -48,7 +47,7 @@ const GEOCODE_BATCH_SIZE = 10
 const MAX_KEYWORD_VARIANTS = 24
 const FETCH_TIMEOUT_MS = 20000
 const ENRICH_LEAD_TIMEOUT_MS = 8000
-const TEXT_SEARCH_MAX_PAGES_PER_QUERY = 3
+const TEXT_SEARCH_MAX_PAGES_PER_QUERY = 5
 const TEXT_SEARCH_BIAS_RADII_M = [35_000, 55_000, 85_000]
 
 /** Inserts per /api/scrape-batch invocation (10–20 range). */
@@ -757,21 +756,27 @@ export async function runCampaignScrapeBatch(params: {
     if (buf.length === 0) return 0
     let inserted = 0
     const chunk = buf.splice(0, BATCH_SIZE)
-    const enriched = await Promise.all(
-      chunk.map(async (p) => {
+    const validPlaces = chunk.filter(
+      (p) => Boolean(p.website) || Boolean(p.formatted_address)
+    )
+    const invalidPlaces = chunk.filter(
+      (p) => !p.website && !p.formatted_address
+    )
+    const enrichedFromValid = await Promise.all(
+      validPlaces.map(async (place) => {
         try {
           const { website, email, guessedEmail, phone } = await fetchWebsiteAndEmailForPlace(
-            p.place_id!,
+            place.place_id!,
             apiKey,
             {
-              knownWebsite: p.website,
+              knownWebsite: place.website,
               beforeDetailCall: consumeGoogleApiCall,
             }
           )
-          return { place: p, website, email, guessedEmail, phone }
+          return { place, website, email, guessedEmail, phone }
         } catch {
           return {
-            place: p,
+            place,
             website: null,
             email: null,
             guessedEmail: null,
@@ -780,11 +785,26 @@ export async function runCampaignScrapeBatch(params: {
         }
       })
     )
+    const enriched: {
+      place: PlaceResult
+      website: string | null
+      email: string | null
+      guessedEmail: string | null
+      phone: string | null
+    }[] = [
+      ...enrichedFromValid,
+      ...invalidPlaces.map((p) => ({
+        place: p,
+        website: null as string | null,
+        email: null as string | null,
+        guessedEmail: null as string | null,
+        phone: null as string | null,
+      })),
+    ]
     enriched.sort((a, b) => {
       const score = (w: string | null) => (w?.trim() ? 1 : 0)
       return score(b.website) - score(a.website)
     })
-    await scraperDelay(SCRAPER_CHUNK_DELAY_MS)
 
     let leadsCollected = await getLeadCount(supabase, campaignId)
 
@@ -851,18 +871,27 @@ export async function runCampaignScrapeBatch(params: {
       if (tryStopCampaignScrape(leadsCollected, checkpoint.rawBusinessesSeen, checkpoint.stopCollecting)) return
 
       const slice = batch.splice(0, BATCH_SIZE)
-      const enriched = await Promise.all(
-        slice.map(async (p) => {
+      const validPlaces = slice.filter(
+        (p) => Boolean(p.website) || Boolean(p.formatted_address)
+      )
+      const invalidPlaces = slice.filter(
+        (p) => !p.website && !p.formatted_address
+      )
+      const enrichedFromValid = await Promise.all(
+        validPlaces.map(async (place) => {
           try {
-            const { website, email, guessedEmail, phone } =
-              await fetchWebsiteAndEmailForPlace(p.place_id!, apiKey, {
-                knownWebsite: p.website,
+            const { website, email, guessedEmail, phone } = await fetchWebsiteAndEmailForPlace(
+              place.place_id!,
+              apiKey,
+              {
+                knownWebsite: place.website,
                 beforeDetailCall: consumeGoogleApiCall,
-              })
-            return { place: p, website, email, guessedEmail, phone }
+              }
+            )
+            return { place, website, email, guessedEmail, phone }
           } catch {
             return {
-              place: p,
+              place,
               website: null,
               email: null,
               guessedEmail: null,
@@ -871,11 +900,20 @@ export async function runCampaignScrapeBatch(params: {
           }
         })
       )
+      const enriched = [
+        ...enrichedFromValid,
+        ...invalidPlaces.map((p) => ({
+          place: p,
+          website: null as string | null,
+          email: null as string | null,
+          guessedEmail: null as string | null,
+          phone: null as string | null,
+        })),
+      ]
       enriched.sort((a, b) => {
         const score = (w: string | null) => (w?.trim() ? 1 : 0)
         return score(b.website) - score(a.website)
       })
-      await scraperDelay(SCRAPER_CHUNK_DELAY_MS)
 
       for (let i = 0; i < enriched.length; i++) {
         if (scrapedThisBatch >= insertBudget) return
@@ -1328,32 +1366,37 @@ export async function runCampaignScrapeBatch(params: {
     const needsEnrich = (rows || []).filter((r) => rowNeedsContactFetch(r))
     const chunk = needsEnrich.slice(checkpoint.contactFetchOffset, checkpoint.contactFetchOffset + BATCH_SIZE)
 
-    for (const row of chunk) {
-      if (checkpoint.stopCollecting) break
-      try {
-        const rowWebsite =
-          typeof row.website === "string" && row.website.trim().length > 0 ? row.website.trim() : null
-        const { website, email, guessedEmail, phone } = await fetchWebsiteAndEmailForPlace(
-          row.place_id as string,
-          apiKey,
-          {
-            knownWebsite: rowWebsite,
-            beforeDetailCall: consumeGoogleApiCall,
+    if (!checkpoint.stopCollecting) {
+      await Promise.all(
+        chunk.map(async (row) => {
+          try {
+            const rowWebsite =
+              typeof row.website === "string" && row.website.trim().length > 0
+                ? row.website.trim()
+                : null
+            const { website, email, guessedEmail, phone } = await fetchWebsiteAndEmailForPlace(
+              row.place_id as string,
+              apiKey,
+              {
+                knownWebsite: rowWebsite,
+                beforeDetailCall: consumeGoogleApiCall,
+              }
+            )
+            if (!website?.trim() && !email?.trim() && !guessedEmail?.trim() && !phone?.trim()) return
+
+            const updatePayload: Record<string, unknown> = {
+              website: website || null,
+              email: email || null,
+              guessed_email: guessedEmail ?? null,
+            }
+            if (phone) updatePayload.phone = phone
+
+            await supabase.from("leads").update(updatePayload).eq("id", row.id as string)
+          } catch {
+            /* skip */
           }
-        )
-        if (!website?.trim() && !email?.trim() && !guessedEmail?.trim() && !phone?.trim()) continue
-
-        const updatePayload: Record<string, unknown> = {
-          website: website || null,
-          email: email || null,
-          guessed_email: guessedEmail ?? null,
-        }
-        if (phone) updatePayload.phone = phone
-
-        await supabase.from("leads").update(updatePayload).eq("id", row.id as string)
-      } catch {
-        /* skip */
-      }
+        })
+      )
     }
 
     checkpoint.contactFetchOffset += chunk.length
