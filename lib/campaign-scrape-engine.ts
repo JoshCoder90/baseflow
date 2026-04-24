@@ -37,7 +37,6 @@ const RADIUS_STEPS = [5000, 10000, 20000, 50000]
 const MAX_RADIUS_STEPS = 3
 const MAX_PLACE_PAGES_PER_SEARCH = 5
 const PAGE_TOKEN_DELAY_MS = 1500
-const MAX_GOOGLE_API_CALLS_PER_CAMPAIGN = 300
 const BATCH_SIZE = 15
 const SMART_STOP_MAX_BUSINESSES_SCANNED = 4000
 const MAX_RAW_BUSINESSES = 2500
@@ -108,6 +107,18 @@ type GenCtx = { mode: "campaign"; campaignId: string }
 
 async function scraperDelay(ms: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ms))
+}
+
+const MAX_CONCURRENT = 5
+
+async function processInBatches<T, R>(items: T[], fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = []
+  for (let i = 0; i < items.length; i += MAX_CONCURRENT) {
+    const batch = items.slice(i, i + MAX_CONCURRENT)
+    const res = await Promise.all(batch.map((item) => fn(item)))
+    results.push(...res)
+  }
+  return results
 }
 
 async function safeFetch(url: string, options: RequestInit = {}): Promise<Response | null> {
@@ -496,6 +507,9 @@ export async function runCampaignScrapeBatch(params: {
   apiKey: string
   insertBudget?: number
 }): Promise<ScrapeBatchResult> {
+  const MAX_API_CALLS = 250
+  let apiCalls = 0
+  try {
   const { supabase, campaignId, userId, apiKey } = params
   const insertBudget = params.insertBudget ?? SCRAPE_BATCH_INSERT_BUDGET
 
@@ -577,13 +591,12 @@ export async function runCampaignScrapeBatch(params: {
   const checkpointFromDb = campaign.scrape_checkpoint as CampaignScrapeCheckpoint | null
   if (!checkpointFromDb || checkpointFromDb.v !== 1) {
     try {
-      let prepMapsCalls = 0
       const beforePrepGoogle = (): boolean => {
-        if (prepMapsCalls >= MAX_GOOGLE_API_CALLS_PER_CAMPAIGN) {
-          console.log("[STOP] API call limit hit")
+        if (apiCalls >= MAX_API_CALLS) {
+          console.log("[HARD STOP] API limit reached:", apiCalls)
           return false
         }
-        prepMapsCalls++
+        apiCalls++
         return true
       }
       const prepared = await prepareCampaignScrapeCheckpoint({
@@ -599,7 +612,7 @@ export async function runCampaignScrapeBatch(params: {
         storedCampaignCoords,
         beforeGoogleMapsCall: beforePrepGoogle,
       })
-      prepared.apiCalls = prepMapsCalls
+      prepared.apiCalls = apiCalls
       const { error: cpSaveErr } = await supabase
         .from("campaigns")
         .update({
@@ -656,6 +669,7 @@ export async function runCampaignScrapeBatch(params: {
       checkpoint.postPhase = "hunter_trim"
     }
   }
+  apiCalls = checkpoint.apiCalls ?? 0
   const ctx: CampaignCtx = {
     campaignId,
     userId,
@@ -731,13 +745,13 @@ export async function runCampaignScrapeBatch(params: {
   let primaryTarget = checkpoint.primaryTarget
 
   function consumeGoogleApiCall(): boolean {
-    const cur = checkpoint.apiCalls ?? 0
-    if (cur >= MAX_GOOGLE_API_CALLS_PER_CAMPAIGN) {
-      console.log("[STOP] API call limit hit")
+    if (apiCalls >= MAX_API_CALLS) {
+      console.log("[HARD STOP] API limit reached:", apiCalls)
       checkpoint.stopCollecting = true
       return false
     }
-    checkpoint.apiCalls = cur + 1
+    apiCalls++
+    checkpoint.apiCalls = apiCalls
     return true
   }
 
@@ -768,40 +782,38 @@ export async function runCampaignScrapeBatch(params: {
     if (buf.length === 0) return 0
     let inserted = 0
     const chunk = buf.splice(0, BATCH_SIZE)
-    const enriched = await Promise.all(
-      chunk.map(async (place) => {
-        if (!place.place_id) {
-          return {
-            place,
-            website: null as string | null,
-            email: null as string | null,
-            guessedEmail: null as string | null,
-            phone: null as string | null,
-            skip: true,
-          }
+    const enriched = await processInBatches(chunk, async (place) => {
+      if (!place.place_id) {
+        return {
+          place,
+          website: null as string | null,
+          email: null as string | null,
+          guessedEmail: null as string | null,
+          phone: null as string | null,
+          skip: true,
         }
-        try {
-          const { website, email, guessedEmail, phone } = await fetchWebsiteAndEmailForPlace(
-            place.place_id,
-            apiKey,
-            {
-              knownWebsite: place.website,
-              beforeDetailCall: consumeGoogleApiCall,
-            }
-          )
-          return { place, website, email, guessedEmail, phone, skip: false }
-        } catch {
-          return {
-            place,
-            website: null,
-            email: null,
-            guessedEmail: null,
-            phone: null,
-            skip: false,
+      }
+      try {
+        const { website, email, guessedEmail, phone } = await fetchWebsiteAndEmailForPlace(
+          place.place_id,
+          apiKey,
+          {
+            knownWebsite: place.website,
+            beforeDetailCall: consumeGoogleApiCall,
           }
+        )
+        return { place, website, email, guessedEmail, phone, skip: false }
+      } catch {
+        return {
+          place,
+          website: null,
+          email: null,
+          guessedEmail: null,
+          phone: null,
+          skip: false,
         }
-      })
-    )
+      }
+    })
     enriched.sort((a, b) => {
       const score = (w: string | null) => (w?.trim() ? 1 : 0)
       return score(b.website) - score(a.website)
@@ -876,40 +888,38 @@ export async function runCampaignScrapeBatch(params: {
       if (tryStopCampaignScrape(leadsCollected, checkpoint.rawBusinessesSeen, checkpoint.stopCollecting)) return
 
       const slice = batch.splice(0, BATCH_SIZE)
-      const enriched = await Promise.all(
-        slice.map(async (place) => {
-          if (!place.place_id) {
-            return {
-              place,
-              website: null as string | null,
-              email: null as string | null,
-              guessedEmail: null as string | null,
-              phone: null as string | null,
-              skip: true,
-            }
+      const enriched = await processInBatches(slice, async (place) => {
+        if (!place.place_id) {
+          return {
+            place,
+            website: null as string | null,
+            email: null as string | null,
+            guessedEmail: null as string | null,
+            phone: null as string | null,
+            skip: true,
           }
-          try {
-            const { website, email, guessedEmail, phone } = await fetchWebsiteAndEmailForPlace(
-              place.place_id,
-              apiKey,
-              {
-                knownWebsite: place.website,
-                beforeDetailCall: consumeGoogleApiCall,
-              }
-            )
-            return { place, website, email, guessedEmail, phone, skip: false }
-          } catch {
-            return {
-              place,
-              website: null,
-              email: null,
-              guessedEmail: null,
-              phone: null,
-              skip: false,
+        }
+        try {
+          const { website, email, guessedEmail, phone } = await fetchWebsiteAndEmailForPlace(
+            place.place_id,
+            apiKey,
+            {
+              knownWebsite: place.website,
+              beforeDetailCall: consumeGoogleApiCall,
             }
+          )
+          return { place, website, email, guessedEmail, phone, skip: false }
+        } catch {
+          return {
+            place,
+            website: null,
+            email: null,
+            guessedEmail: null,
+            phone: null,
+            skip: false,
           }
-        })
-      )
+        }
+      })
       enriched.sort((a, b) => {
         const score = (w: string | null) => (w?.trim() ? 1 : 0)
         return score(b.website) - score(a.website)
@@ -1400,5 +1410,8 @@ export async function runCampaignScrapeBatch(params: {
     done,
     leadCap,
     phase: checkpoint.postPhase !== "none" ? checkpoint.postPhase : checkpoint.collectPhase,
+  }
+  } finally {
+    console.log("[TOTAL API CALLS]:", apiCalls)
   }
 }
