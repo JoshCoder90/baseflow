@@ -1,14 +1,15 @@
 "use client"
 
-import { useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { LeadGenerationProgress } from "./LeadGenerationProgress"
 import { CampaignTabs } from "./CampaignTabs"
 
 type Props = {
   campaignId: string
   targetSearchQuery: string
-  leadGenerationStatus: "generating" | "complete" | "failed"
-  onStatusChange?: (status: "generating" | "complete" | "failed") => void
+  /** `campaigns.status` from the parent (e.g. draft | running | completed). */
+  campaignStatus: string | null
+  onCampaignStatusChange?: (status: string | null) => void
   onLeadCountChange?: (count: number) => void
   onEditMessages?: () => void
 }
@@ -16,28 +17,36 @@ type Props = {
 export function CampaignLeadSection({
   campaignId,
   targetSearchQuery,
-  leadGenerationStatus,
-  onStatusChange,
+  campaignStatus,
+  onCampaignStatusChange,
   onLeadCountChange,
   onEditMessages,
 }: Props) {
-  const [status, setStatus] = useState(leadGenerationStatus)
+  const [status, setStatus] = useState(campaignStatus)
 
-  function handleStatusChange(s: "generating" | "complete" | "failed") {
-    setStatus(s)
-    onStatusChange?.(s)
-  }
+  useEffect(() => {
+    setStatus(campaignStatus)
+  }, [campaignStatus])
+
+  const handleCampaignStatusChange = useCallback(
+    (s: string | null) => {
+      setStatus(s)
+      onCampaignStatusChange?.(s)
+    },
+    [onCampaignStatusChange]
+  )
 
   return (
     <>
       <LeadGenerationProgress
         campaignId={campaignId}
         targetSearchQuery={targetSearchQuery}
-        initialStatus={leadGenerationStatus}
-        onStatusChange={handleStatusChange}
-        onLeadCountChange={onLeadCountChange}
+        onCampaignStatusChange={handleCampaignStatusChange}
       />
-      <CampaignTabs campaignId={campaignId} pollForLeads={status === "generating"} />
+      <CampaignTabs
+        campaignId={campaignId}
+        pollForLeads={(status ?? "").toLowerCase() === "running"}
+      />
     </>
   )
 }

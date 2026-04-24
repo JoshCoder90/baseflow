@@ -8,6 +8,7 @@ import { NextResponse } from "next/server"
 import { createClient as createServerClient } from "@/lib/supabase/server"
 import { heavyRouteIpLimitResponse } from "@/lib/ip-rate-limit"
 import { runCampaignScrapeBatch } from "@/lib/campaign-scrape-engine"
+import { MAX_LEADS_PER_CAMPAIGN } from "@/lib/campaign-leads-insert"
 
 export async function POST(req: Request) {
   try {
@@ -76,6 +77,21 @@ export async function POST(req: Request) {
       )
     }
 
+    const gate = campaign as {
+      status?: string | null
+      leads_found?: number | null
+      lead_generation_status?: string | null
+    }
+    if (
+      gate.status === "completed" ||
+      (typeof gate.leads_found === "number" && gate.leads_found >= MAX_LEADS_PER_CAMPAIGN) ||
+      gate.lead_generation_status === "complete" ||
+      gate.lead_generation_status === "partial"
+    ) {
+      console.log("[BLOCKED] Campaign already complete")
+      return NextResponse.json({ ok: true, done: true })
+    }
+
     console.log("[scrape-batch] STEP 1 - campaign loaded")
 
     console.log("[scrape-batch] STEP 2 - starting scrape")
@@ -97,18 +113,6 @@ export async function POST(req: Request) {
     try {
       const campaignStatus = (campaign as { status?: string | null }).status
       console.log("[scrape] campaign.status:", campaignStatus)
-
-      if (campaignStatus === "completed") {
-        console.log("[scrape] early exit: campaign already completed")
-        return NextResponse.json(
-          {
-            ok: false,
-            error: "Campaign already completed",
-            debug: { campaignId, reason: "campaign_completed" },
-          },
-          { status: 400 }
-        )
-      }
 
       console.log("[scrape] STEP 2.1b - optional campaigns.status → running")
       const preserveWhileScraping = new Set(["active", "sending", "paused", "stopped"])

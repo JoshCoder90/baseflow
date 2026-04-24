@@ -91,7 +91,7 @@ export async function GET(req: NextRequest) {
   const { data: campaign, error: campErr } = await supabase
     .from("campaigns")
     .select(
-      "id, status, lead_generation_status, lead_generation_stage, target_search_query, audience_id"
+      "id, status, leads_found, target_search_query, audience_id"
     )
     .eq("id", campaignId)
     .eq("user_id", user.id)

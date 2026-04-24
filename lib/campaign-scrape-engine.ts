@@ -33,8 +33,11 @@ import { SCRAPE_POLICY } from "@/lib/rate-limit-policy"
 
 const MAX_LEADS = SCRAPE_POLICY.maxLeadsPerScrape
 const RADIUS_STEPS = [5000, 10000, 20000, 50000]
-const MAX_PLACE_PAGES_PER_SEARCH = 60
-const PAGE_TOKEN_DELAY_MS = 1000
+/** Legacy Nearby Search returns a fixed payload shape; field masks are not supported on this endpoint. */
+const MAX_RADIUS_STEPS = 3
+const MAX_PLACE_PAGES_PER_SEARCH = 3
+const PAGE_TOKEN_DELAY_MS = 1500
+const MAX_GOOGLE_API_CALLS_PER_CAMPAIGN = 300
 const BATCH_SIZE = 15
 const SCRAPER_CHUNK_DELAY_MS = 150
 const SMART_STOP_MAX_BUSINESSES_SCANNED = 4000
@@ -45,7 +48,7 @@ const GEOCODE_BATCH_SIZE = 10
 const MAX_KEYWORD_VARIANTS = 24
 const FETCH_TIMEOUT_MS = 20000
 const ENRICH_LEAD_TIMEOUT_MS = 8000
-const TEXT_SEARCH_MAX_PAGES_PER_QUERY = 60
+const TEXT_SEARCH_MAX_PAGES_PER_QUERY = 3
 const TEXT_SEARCH_BIAS_RADII_M = [35_000, 55_000, 85_000]
 
 /** Inserts per /api/scrape-batch invocation (10–20 range). */
@@ -78,6 +81,8 @@ export type CampaignScrapeCheckpoint = {
   textPageNum: number
   postPhase: "none" | "contact_fetch" | "hunter_trim" | "done"
   contactFetchOffset: number
+  /** Cumulative Google Maps HTTP calls for this campaign scrape (checkpointed across batches). */
+  apiCalls?: number
 }
 
 type SearchPoint = { area: string; lat: number; lng: number }
@@ -86,6 +91,8 @@ type PlaceResult = {
   name?: string
   vicinity?: string
   formatted_address?: string
+  /** Present only on some Text Search responses; skips a Place Details call when set. */
+  website?: string
   rating?: number
   geometry?: { location: { lat: number; lng: number } }
 }
@@ -270,10 +277,17 @@ export async function prepareCampaignScrapeCheckpoint(params: {
   ctx: CampaignCtx
   apiKey: string
   storedCampaignCoords?: { lat: number; lng: number } | null
+  /** Return false to skip the upcoming Google HTTP call (budget exhausted). */
+  beforeGoogleMapsCall?: () => boolean
 }): Promise<CampaignScrapeCheckpoint> {
-  const { supabase, ctx, apiKey, storedCampaignCoords } = params
+  const { supabase, ctx, apiKey, storedCampaignCoords, beforeGoogleMapsCall } = params
   const niche = ctx.niche
   const location = ctx.location
+
+  async function gatedSafeFetch(url: string, options: RequestInit = {}): Promise<Response | null> {
+    if (beforeGoogleMapsCall && !beforeGoogleMapsCall()) return null
+    return safeFetch(url, options)
+  }
 
   let primaryTarget: GeocodedTarget | null = null
 
@@ -283,7 +297,7 @@ export async function prepareCampaignScrapeCheckpoint(params: {
       storedCampaignCoords.lng,
       location,
       apiKey,
-      safeFetch,
+      gatedSafeFetch,
       safeJson
     )
     if (primaryTarget) {
@@ -292,7 +306,7 @@ export async function prepareCampaignScrapeCheckpoint(params: {
   }
 
   if (!primaryTarget) {
-    primaryTarget = await geocodeAddressToTarget(location, apiKey, safeFetch, safeJson)
+    primaryTarget = await geocodeAddressToTarget(location, apiKey, gatedSafeFetch, safeJson)
     if (primaryTarget) {
       console.log(`Geocoded city → ${primaryTarget.lat},${primaryTarget.lng}`)
     }
@@ -323,7 +337,7 @@ export async function prepareCampaignScrapeCheckpoint(params: {
     const geoResults = await Promise.all(
       chunk.map(async (area) => {
         const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(area)}&key=${apiKey}`
-        const res = await safeFetch(url)
+        const res = await gatedSafeFetch(url)
         const geoData = await safeJson<{
           results?: { geometry: { location: { lat: number; lng: number } } }[]
         }>(res)
@@ -395,7 +409,13 @@ export async function prepareCampaignScrapeCheckpoint(params: {
 
 async function fetchWebsiteAndEmailForPlace(
   placeId: string,
-  apiKey: string
+  apiKey: string,
+  opts?: {
+    /** When set, skips Place Details (list response already had a website URL). */
+    knownWebsite?: string | null
+    /** Invoked immediately before a Place Details HTTP request; return false to skip the request. */
+    beforeDetailCall?: () => boolean
+  }
 ): Promise<{
   website: string | null
   email: string | null
@@ -404,18 +424,26 @@ async function fetchWebsiteAndEmailForPlace(
 }> {
   const signal = AbortSignal.timeout(ENRICH_LEAD_TIMEOUT_MS)
   try {
-    const detailsUrl = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${encodeURIComponent(
-      placeId
-    )}&fields=website,formatted_phone_number&key=${apiKey}`
-    const res = await fetch(detailsUrl, { signal })
-    if (!res.ok) return { website: null, email: null, guessedEmail: null, phone: null }
-    const details = (await res.json()) as {
-      result?: { website?: string; formatted_phone_number?: string }
-    }
+    let website: string | null = opts?.knownWebsite?.trim() ? opts.knownWebsite.trim() : null
+    let phone: string | null = null
 
-    const website = details.result?.website ?? null
-    const phoneRaw = details.result?.formatted_phone_number?.trim() ?? ""
-    const phone = phoneRaw.length > 0 ? phoneRaw : null
+    if (!website) {
+      if (opts?.beforeDetailCall && !opts.beforeDetailCall()) {
+        return { website: null, email: null, guessedEmail: null, phone: null }
+      }
+      const detailsUrl = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${encodeURIComponent(
+        placeId
+      )}&fields=website,formatted_phone_number&key=${apiKey}`
+      const res = await fetch(detailsUrl, { signal })
+      if (!res.ok) return { website: null, email: null, guessedEmail: null, phone: null }
+      const details = (await res.json()) as {
+        result?: { website?: string; formatted_phone_number?: string }
+      }
+
+      website = details.result?.website ?? null
+      const phoneRaw = details.result?.formatted_phone_number?.trim() ?? ""
+      phone = phoneRaw.length > 0 ? phoneRaw : null
+    }
 
     let email: string | null = null
     let guessedEmail: string | null = null
@@ -557,6 +585,15 @@ export async function runCampaignScrapeBatch(params: {
   const checkpointFromDb = campaign.scrape_checkpoint as CampaignScrapeCheckpoint | null
   if (!checkpointFromDb || checkpointFromDb.v !== 1) {
     try {
+      let prepMapsCalls = 0
+      const beforePrepGoogle = (): boolean => {
+        if (prepMapsCalls >= MAX_GOOGLE_API_CALLS_PER_CAMPAIGN) {
+          console.log("[STOP] API call limit hit")
+          return false
+        }
+        prepMapsCalls++
+        return true
+      }
       const prepared = await prepareCampaignScrapeCheckpoint({
         supabase,
         ctx: {
@@ -568,7 +605,9 @@ export async function runCampaignScrapeBatch(params: {
         },
         apiKey,
         storedCampaignCoords,
+        beforeGoogleMapsCall: beforePrepGoogle,
       })
+      prepared.apiCalls = prepMapsCalls
       const { error: cpSaveErr } = await supabase
         .from("campaigns")
         .update({
@@ -680,6 +719,22 @@ export async function runCampaignScrapeBatch(params: {
   let scrapedThisBatch = 0
   let primaryTarget = checkpoint.primaryTarget
 
+  function consumeGoogleApiCall(): boolean {
+    const cur = checkpoint.apiCalls ?? 0
+    if (cur >= MAX_GOOGLE_API_CALLS_PER_CAMPAIGN) {
+      console.log("[STOP] API call limit hit")
+      checkpoint.stopCollecting = true
+      return false
+    }
+    checkpoint.apiCalls = cur + 1
+    return true
+  }
+
+  async function googlePlacesFetch(url: string): Promise<Response | null> {
+    if (!consumeGoogleApiCall()) return null
+    return safeFetch(url)
+  }
+
   function tryStopCampaignScrape(
     leadsCollected: number,
     rawSeen: number,
@@ -707,7 +762,11 @@ export async function runCampaignScrapeBatch(params: {
         try {
           const { website, email, guessedEmail, phone } = await fetchWebsiteAndEmailForPlace(
             p.place_id!,
-            apiKey
+            apiKey,
+            {
+              knownWebsite: p.website,
+              beforeDetailCall: consumeGoogleApiCall,
+            }
           )
           return { place: p, website, email, guessedEmail, phone }
         } catch {
@@ -796,7 +855,10 @@ export async function runCampaignScrapeBatch(params: {
         slice.map(async (p) => {
           try {
             const { website, email, guessedEmail, phone } =
-              await fetchWebsiteAndEmailForPlace(p.place_id!, apiKey)
+              await fetchWebsiteAndEmailForPlace(p.place_id!, apiKey, {
+                knownWebsite: p.website,
+                beforeDetailCall: consumeGoogleApiCall,
+              })
             return { place: p, website, email, guessedEmail, phone }
           } catch {
             return {
@@ -956,7 +1018,7 @@ export async function runCampaignScrapeBatch(params: {
         const point = checkpoint.searchPoints[checkpoint.pi]
 
         innerR: while (
-          checkpoint.r < RADIUS_STEPS.length &&
+          checkpoint.r < Math.min(RADIUS_STEPS.length, MAX_RADIUS_STEPS) &&
           scrapedThisBatch < insertBudget &&
           !checkpoint.stopCollecting
         ) {
@@ -999,7 +1061,7 @@ export async function runCampaignScrapeBatch(params: {
                 ? `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${point.lat},${point.lng}&radius=${radius}&keyword=${encodeURIComponent(keyword)}&key=${apiKey}`
                 : `https://maps.googleapis.com/maps/api/place/nearbysearch/json?pagetoken=${requestToken}&key=${apiKey}`
 
-              const res = await safeFetch(url)
+              const res = await googlePlacesFetch(url)
               const data = await safeJson<{
                 results?: PlaceResult[]
                 error_message?: string
@@ -1019,6 +1081,7 @@ export async function runCampaignScrapeBatch(params: {
 
               globalDedupe = await reloadDedupe()
 
+              const seenPlaceIdsThisPage = new Set<string>()
               for (const place of results) {
                 if (scrapedThisBatch >= insertBudget) break outer
                 if (checkpoint.stopCollecting) break outer
@@ -1035,7 +1098,10 @@ export async function runCampaignScrapeBatch(params: {
                 }
 
                 const placeId = place.place_id
-                if (!placeId || globalDedupe.seenPlaceIds.has(placeId)) continue
+                if (!placeId) continue
+                if (seenPlaceIdsThisPage.has(placeId)) continue
+                seenPlaceIdsThisPage.add(placeId)
+                if (globalDedupe.seenPlaceIds.has(placeId)) continue
                 if (
                   !isNearbyPlaceInTargetRegion(place, { lat: point.lat, lng: point.lng }, radius, primaryTarget)
                 ) {
@@ -1180,7 +1246,7 @@ export async function runCampaignScrapeBatch(params: {
             )}&key=${apiKey}`
           }
 
-          const res = await safeFetch(url)
+          const res = await googlePlacesFetch(url)
           const data = await safeJson<{
             results?: PlaceResult[]
             next_page_token?: string
@@ -1256,56 +1322,33 @@ export async function runCampaignScrapeBatch(params: {
 
     const { data: rows } = await supabase
       .from("leads")
-      .select("id, place_id, email")
+      .select("id, place_id, email, website")
       .eq("campaign_id", campaignId)
 
     const needsEnrich = (rows || []).filter((r) => rowNeedsContactFetch(r))
     const chunk = needsEnrich.slice(checkpoint.contactFetchOffset, checkpoint.contactFetchOffset + BATCH_SIZE)
 
     for (const row of chunk) {
-      const signal = AbortSignal.timeout(ENRICH_LEAD_TIMEOUT_MS)
+      if (checkpoint.stopCollecting) break
       try {
-        const detailsUrl = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${encodeURIComponent(
-          row.place_id as string
-        )}&fields=website,formatted_phone_number&key=${apiKey}`
-        const res = await fetch(detailsUrl, { signal })
-        if (!res.ok) continue
-        const details = (await res.json()) as {
-          result?: { website?: string; formatted_phone_number?: string }
-        }
-
-        const website = details.result?.website ?? null
-        const phoneFromDetails = details.result?.formatted_phone_number?.trim() || null
-
-        let email: string | null = null
-        let guessed_email: string | null = null
-        if (website?.trim()) {
-          const r = await scrapeEmailFromWebsite(website, signal)
-          email = r.email
-          guessed_email = r.guessedEmail
-        }
-
-        const domain = domainFromWebsiteUrl(website)
-        if (!email && domain) {
-          const hunter = await enrichEmail(domain)
-          if (hunter && isEmailAllowedForCampaignQueue(hunter)) {
-            email = hunter
+        const rowWebsite =
+          typeof row.website === "string" && row.website.trim().length > 0 ? row.website.trim() : null
+        const { website, email, guessedEmail, phone } = await fetchWebsiteAndEmailForPlace(
+          row.place_id as string,
+          apiKey,
+          {
+            knownWebsite: rowWebsite,
+            beforeDetailCall: consumeGoogleApiCall,
           }
-        }
-        if (!email && domain) {
-          const guessed = firstGuessableEmailForDomain(domain)
-          if (guessed) {
-            email = guessed
-            guessed_email = guessed
-          }
-        }
+        )
+        if (!website?.trim() && !email?.trim() && !guessedEmail?.trim() && !phone?.trim()) continue
 
         const updatePayload: Record<string, unknown> = {
           website: website || null,
           email: email || null,
-          guessed_email: guessed_email ?? null,
+          guessed_email: guessedEmail ?? null,
         }
-        if (phoneFromDetails) updatePayload.phone = phoneFromDetails
+        if (phone) updatePayload.phone = phone
 
         await supabase.from("leads").update(updatePayload).eq("id", row.id as string)
       } catch {
@@ -1334,6 +1377,7 @@ export async function runCampaignScrapeBatch(params: {
         lead_generation_status: scrapeComplete ? "complete" : "partial",
         lead_generation_stage: "complete",
         scrape_checkpoint: null,
+        status: "completed",
       })
       .eq("id", campaignId)
       .eq("user_id", userId)

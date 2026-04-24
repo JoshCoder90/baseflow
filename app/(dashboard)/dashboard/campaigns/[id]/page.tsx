@@ -12,7 +12,7 @@ type Campaign = {
   name?: string | null
   target_audience?: string | null
   target_search_query?: string | null
-  lead_generation_status?: string | null
+  leads_found?: number | null
   audience_id?: string | null
   channel?: string | null
   audiences?: {
@@ -50,7 +50,7 @@ function emptyCampaignShell(campaignId: string): Campaign {
     name: null,
     target_audience: null,
     target_search_query: null,
-    lead_generation_status: null,
+    leads_found: null,
     audience_id: null,
     channel: null,
     audiences: null,
@@ -204,8 +204,16 @@ export default async function CampaignDetailPage({
             </h1>
             <p className="mt-1 text-sm text-zinc-500">{nicheLabel}</p>
           </div>
-          <div className="flex items-center gap-3 shrink-0">
-            <CampaignStatusBadge status={campaign.status} />
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {(campaign.status ?? "").toLowerCase() === "running" && (
+              <CampaignStatusBadge status="running" />
+            )}
+            {(campaign.status ?? "").toLowerCase() === "completed" && (
+              <CampaignStatusBadge status="completed" />
+            )}
+            {!["running", "completed"].includes((campaign.status ?? "").toLowerCase()) && (
+              <CampaignStatusBadge status={campaign.status ?? "draft"} />
+            )}
           </div>
         </header>
 

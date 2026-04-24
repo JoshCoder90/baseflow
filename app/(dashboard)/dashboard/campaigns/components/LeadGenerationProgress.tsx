@@ -1,35 +1,22 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useEffect } from "react"
 import { supabase } from "@/lib/supabase"
-
-type Stage = "searching" | "enriching" | "filling" | "expanding" | "complete"
 
 type Props = {
   campaignId: string
-  targetSearchQuery: string
-  initialStatus?: "generating" | "complete" | "failed"
-  onStatusChange?: (status: "generating" | "complete" | "failed") => void
-  onStageChange?: (stage: Stage | null) => void
-  onLeadCountChange?: (count: number) => void
+  /** Kept for call-site compatibility; UI is driven only by `campaigns.status`. */
+  targetSearchQuery?: string
+  onCampaignStatusChange?: (status: string | null) => void
 }
 
 /**
- * Subscribes to campaign row updates only. Scraping is started from "Find Leads" (CreateCampaignForm),
- * not from useEffect, so we never auto-fire the API on mount.
+ * Subscribes to `campaigns.status` only (no `lead_generation_*` in the client).
  */
 export function LeadGenerationProgress({
   campaignId,
-  targetSearchQuery: _targetSearchQuery,
-  initialStatus = "generating",
-  onStatusChange,
-  onStageChange,
+  onCampaignStatusChange,
 }: Props) {
-  const [status, setStatus] = useState<"generating" | "complete" | "failed">(
-    initialStatus
-  )
-  const [stage, setStage] = useState<Stage | null>(null)
-
   useEffect(() => {
     const channel = supabase
       .channel(`campaign-status-${campaignId}`)
@@ -37,20 +24,17 @@ export function LeadGenerationProgress({
         "postgres_changes",
         { event: "UPDATE", schema: "public", table: "campaigns", filter: `id=eq.${campaignId}` },
         (payload) => {
-          const row = payload.new as { lead_generation_status?: string; lead_generation_stage?: string }
-          const s = (row?.lead_generation_status ?? status) as "generating" | "complete" | "failed"
-          const st = (row?.lead_generation_stage ?? null) as Stage | null
-          setStatus(s)
-          setStage(st)
-          onStatusChange?.(s)
-          onStageChange?.(st)
+          const row = payload.new as { status?: string | null }
+          if (typeof row.status === "string") {
+            onCampaignStatusChange?.(row.status)
+          }
         }
       )
       .subscribe()
     return () => {
-      supabase.removeChannel(channel)
+      void supabase.removeChannel(channel)
     }
-  }, [campaignId])
+  }, [campaignId, onCampaignStatusChange])
 
   return null
 }

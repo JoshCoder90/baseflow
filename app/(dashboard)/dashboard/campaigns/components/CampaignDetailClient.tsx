@@ -49,8 +49,8 @@ export function CampaignDetailClient({
 }: Props) {
   const router = useRouter()
   const [isEditing, setIsEditing] = useState(false)
-  /** "idle" | "starting" (HTTP) | "running" (OK, waiting for status active/sending/completed). */
-  const [startSendingUi, setStartSendingUi] = useState<"idle" | "starting" | "running">("idle")
+  /** "idle" | "starting" (HTTP) | "awaiting_active" (OK, waiting for status active/sending/completed). */
+  const [startSendingUi, setStartSendingUi] = useState<"idle" | "starting" | "awaiting_active">("idle")
   const [stopping, setStopping] = useState(false)
   const [resuming, setResuming] = useState(false)
 
@@ -62,10 +62,10 @@ export function CampaignDetailClient({
   }, [requestEdit, onEditConsumed])
 
   const targetLabel = getTargetLabel(campaign)
-  const status = campaign.status ?? "draft"
+  const status = (campaign.status ?? "draft").toLowerCase()
 
   useEffect(() => {
-    if (startSendingUi !== "running") return
+    if (startSendingUi !== "awaiting_active") return
     if (status === "active" || status === "sending" || status === "completed") {
       setStartSendingUi("idle")
     }
@@ -79,7 +79,7 @@ export function CampaignDetailClient({
       const res = await fetch(`/api/campaigns/${campaign.id}/start-sending`, { method: "POST" })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? "Failed to start sending")
-      setStartSendingUi("running")
+      setStartSendingUi("awaiting_active")
       router.refresh()
     } catch {
       setStartSendingUi("idle")
@@ -157,7 +157,13 @@ export function CampaignDetailClient({
         </div>
         <div className="rounded-xl border border-zinc-700/80 bg-zinc-800/40 p-5">
           <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-1">Status</p>
-          <CampaignStatusBadge status={status} />
+          <div className="flex flex-wrap items-center gap-2">
+            {status === "running" && <CampaignStatusBadge status="running" />}
+            {status === "completed" && <CampaignStatusBadge status="completed" />}
+            {!["running", "completed"].includes(status) && (
+              <CampaignStatusBadge status={campaign.status} />
+            )}
+          </div>
         </div>
       </div>
 
@@ -217,7 +223,7 @@ export function CampaignDetailClient({
           >
             {startSendingUi === "starting"
               ? "Starting…"
-              : startSendingUi === "running"
+              : startSendingUi === "awaiting_active"
                 ? "Running…"
                 : "Start Sending Messages"}
           </button>
