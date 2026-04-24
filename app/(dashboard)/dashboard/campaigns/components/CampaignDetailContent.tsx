@@ -13,9 +13,11 @@ import { CampaignQueueTab, type CampaignQueueMessageRow } from "./CampaignQueueT
 import { ScrapingProgressBar } from "./ScrapingProgressBar"
 import { contactKeyForCampaignLead, MAX_LEADS_PER_CAMPAIGN } from "@/lib/campaign-leads-insert"
 import type { CampaignQueueStats } from "@/lib/get-campaign-stats"
+import { getCampaignStats } from "@/lib/get-campaign-stats"
 
-/** `/api/campaign-data` auto-refresh: queue, leads, sending stats (single interval, no overlap with a second poll). */
-const CAMPAIGN_DATA_POLL_MS = 3000
+/** Polling for live `campaigns` row — `/api/get-campaign` (2s, stops when `completed`). Full leads/queue: Supabase in `fetchCampaignData` + Realtime. */
+const CAMPAIGN_STATUS_POLL_MS = 2000
+const LEADS_PAGE = 1000
 
 type Campaign = {
   id: string
@@ -76,6 +78,92 @@ function getTargetLabel(campaign: Campaign): string {
   return campaign.target_audience ?? "—"
 }
 
+/** Same scoping and shapes as the former `/api/campaign-data` route; uses browser Supabase + RLS. */
+async function loadLeadsAndQueueFromClient(
+  campaignId: string,
+  audienceId: string | null
+): Promise<{
+  leads: Lead[]
+  queueMessages: CampaignQueueMessageRow[]
+  queueStats: CampaignQueueStats
+} | null> {
+  const { data: probe } = await supabase
+    .from("leads")
+    .select("id")
+    .eq("campaign_id", campaignId)
+    .limit(1)
+  const hasCampaignLeads = (probe ?? []).length > 0
+  const scope: "campaign" | "audience" =
+    hasCampaignLeads ? "campaign" : audienceId ? "audience" : "campaign"
+
+  const rows: Record<string, unknown>[] = []
+  for (let from = 0; ; from += LEADS_PAGE) {
+    const to = from + LEADS_PAGE - 1
+    let q = supabase
+      .from("leads")
+      .select("*")
+      .order("id", { ascending: true })
+      .range(from, to)
+    if (scope === "campaign") q = q.eq("campaign_id", campaignId)
+    else if (audienceId) q = q.eq("audience_id", audienceId)
+    else q = q.eq("campaign_id", campaignId)
+    const { data, error } = await q
+    if (error) {
+      console.error("[loadLeadsAndQueueFromClient] leads", error)
+      return null
+    }
+    const chunk = (data ?? []) as (Record<string, unknown> & { phone?: unknown })[]
+    for (const row of chunk) {
+      const { phone: _omit, ...rest } = row
+      rows.push(rest)
+    }
+    if (chunk.length < LEADS_PAGE) break
+  }
+
+  const { data: queueList, error: qErr } = await supabase
+    .from("campaign_messages")
+    .select(
+      "id, lead_id, campaign_id, step_number, status, next_send_at, sent_at, message_body"
+    )
+    .eq("campaign_id", campaignId)
+    .order("id", { ascending: true })
+
+  if (qErr) {
+    console.error("[loadLeadsAndQueueFromClient] campaign_messages", qErr)
+  }
+  const queueListSafe = (queueList ?? []) as Record<string, unknown>[]
+  const leadIds = [...new Set(queueListSafe.map((m) => m.lead_id as string))]
+
+  let queueMessages: CampaignQueueMessageRow[] = []
+  if (leadIds.length > 0) {
+    const { data: leadRows } = await supabase
+      .from("leads")
+      .select("id, name, email")
+      .in("id", leadIds)
+    const leadMap = new Map(
+      (leadRows ?? []).map((l) => [l.id as string, l as { name: string | null; email: string | null }])
+    )
+    queueMessages = queueListSafe.map((m) => {
+      const lid = m.lead_id as string
+      const L = leadMap.get(lid)
+      return {
+        ...m,
+        leads: L ? { name: L.name, email: L.email } : null,
+      } as unknown as CampaignQueueMessageRow
+    })
+  } else {
+    queueMessages = queueListSafe as unknown as CampaignQueueMessageRow[]
+  }
+
+  const queueStats = await getCampaignStats(supabase, campaignId)
+
+  return {
+    leads: rows.map((raw) => normalizeLead(raw)),
+    queueMessages,
+    queueStats,
+  }
+}
+
 /** Match API / DB: non-null, non-empty `email` after trim. */
 function leadHasNonEmptyEmail(l: Pick<Lead, "email">): boolean {
   const e = (l.email ?? "").trim()
@@ -113,10 +201,8 @@ function CampaignStatsLoadingSkeleton() {
 
 export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
   const router = useRouter()
-  const campaign = initialCampaign
-  const campaignId = campaign.id
-
-  /** Live `campaigns` row fields from `/api/campaign-data` + Realtime (single source for UI). */
+  const [apiPatch, setApiPatch] = useState<Partial<Campaign> | null>(null)
+  /** Live `campaigns` row fields from `/api/get-campaign` + Realtime (single source for UI). */
   const [liveCampaign, setLiveCampaign] = useState<{
     status: string | null
     leads_found: number | null
@@ -125,6 +211,14 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
     leads_found:
       typeof initialCampaign.leads_found === "number" ? initialCampaign.leads_found : null,
   })
+  const campaign = { ...initialCampaign, ...apiPatch } as Campaign
+  const campaignId = campaign.id
+  const statusRef = useRef<string | null>(null)
+  statusRef.current = (liveCampaign.status ?? campaign.status ?? null) as string | null
+
+  useEffect(() => {
+    setApiPatch(null)
+  }, [campaignId])
 
   /** Idle until click; "starting" = HTTP in flight; "awaiting_active" = OK, waiting until campaign is live/completed. */
   const [startSendingUi, setStartSendingUi] = useState<
@@ -170,61 +264,52 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
   const showLeadSection = Boolean(campaign.target_search_query)
 
   /**
-   * Live DB snapshot: `/api/campaign-data` returns all lead rows (paginated on server).
+   * Live DB snapshot: GET `/api/get-campaign` for the row; leads + queue via Supabase (same data as former `campaign-data`).
    * Total leads / emails found = derive from `leadsForThisCampaign` only (no separate count state).
    */
   const fetchCampaignData = useCallback(async () => {
     const id = campaignId
     try {
       const res = await fetch(
-        `/api/campaign-data?id=${encodeURIComponent(campaignId)}`,
+        `/api/get-campaign?id=${encodeURIComponent(campaignId)}`,
         { cache: "no-store" }
       )
-      if (!res.ok) {
-        console.error("fetchCampaignData: campaign-data HTTP", res.status, campaignId)
-        return
-      }
+      if (!res.ok) return
 
-      const payload = (await res.json()) as {
-        campaign?: {
-          status?: string | null
-          leads_found?: number | null
-          target_search_query?: string | null
-        }
-        leads?: Record<string, unknown>[]
-        queueMessages?: CampaignQueueMessageRow[]
-        queueStats?: CampaignQueueStats
+      const data = (await res.json()) as Record<string, unknown> & {
+        id?: string
+        status?: string | null
+        leads_found?: number | null
+        audience_id?: string | null
       }
-
       if (id !== activeCampaignIdRef.current) return
+      if (!data.id) return
 
-      const row = payload.campaign
-      const leadsData = payload.leads ?? []
+      const { body: _b, error: _err, ...row } = data
+      setApiPatch((p) => ({ ...p, ...(row as unknown as Partial<Campaign>) }))
 
-      if (row) {
-        setLiveCampaign((prev) => ({
-          status: typeof row.status === "string" ? row.status : prev.status,
-          leads_found:
-            typeof row.leads_found === "number"
-              ? row.leads_found
-              : row.leads_found != null && !Number.isNaN(Number(row.leads_found))
-                ? Number(row.leads_found)
-                : prev.leads_found,
-        }))
-      }
+      const st = row.status
+      const lf = row.leads_found
+      setLiveCampaign((prev) => ({
+        status: typeof st === "string" ? st : prev.status,
+        leads_found:
+          typeof lf === "number"
+            ? lf
+            : lf != null && !Number.isNaN(Number(lf))
+              ? Number(lf)
+              : prev.leads_found,
+      }))
 
-      setLeadsForThisCampaign(leadsData.map((raw) => normalizeLead(raw)))
-      setQueueMessages(
-        Array.isArray(payload.queueMessages) ? payload.queueMessages : []
-      )
-      const qs = payload.queueStats
-      if (
-        qs &&
-        typeof qs.sent === "number" &&
-        typeof qs.notSent === "number" &&
-        typeof qs.failed === "number"
-      ) {
-        setQueueStats(qs)
+      const audId =
+        row.audience_id != null && row.audience_id !== ""
+          ? String(row.audience_id)
+          : null
+      const loaded = await loadLeadsAndQueueFromClient(campaignId, audId)
+      if (id !== activeCampaignIdRef.current) return
+      if (loaded) {
+        setLeadsForThisCampaign(loaded.leads)
+        setQueueMessages(loaded.queueMessages)
+        setQueueStats(loaded.queueStats)
       } else {
         setQueueStats({ sent: 0, notSent: 0, failed: 0 })
       }
@@ -258,17 +343,38 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
   const fetchCampaignDataRef = useRef(fetchCampaignData)
   fetchCampaignDataRef.current = fetchCampaignData
 
+  const pollStops = (liveCampaign.status ?? campaign.status ?? "")
+    .toLowerCase() === "completed"
   /**
-   * Poll `/api/campaign-data` every 3s so Queue tab, stats, and lead rows update without a full page refresh.
-   * Initial fetch runs in the campaign-switch effect above; this only schedules repeats and clears on unmount.
+   * Light poll: `/api/get-campaign` every 2s for live status + row fields. Stops when `completed` (leads/queue: Realtime + `fetchCampaignData`).
    */
   useEffect(() => {
     if (!campaignId) return
-    const interval = setInterval(() => {
-      void fetchCampaignDataRef.current()
-    }, CAMPAIGN_DATA_POLL_MS)
+    if (pollStops) return
+    const interval = setInterval(async () => {
+      if ((statusRef.current ?? "").toLowerCase() === "completed") return
+      const res = await fetch(
+        `/api/get-campaign?id=${encodeURIComponent(campaignId)}`
+      )
+      if (!res.ok) return
+      const data = (await res.json()) as Record<string, unknown> & { id?: string }
+      if (!data.id) return
+      const { body: _b, error: _err, ...row } = data
+      setApiPatch((p) => ({ ...p, ...(row as unknown as Partial<Campaign>) }))
+      const st = row.status
+      const lf = row.leads_found
+      setLiveCampaign((prev) => ({
+        status: typeof st === "string" ? st : prev.status,
+        leads_found:
+          typeof lf === "number"
+            ? lf
+            : lf != null && !Number.isNaN(Number(lf))
+              ? Number(lf)
+              : prev.leads_found,
+      }))
+    }, CAMPAIGN_STATUS_POLL_MS)
     return () => clearInterval(interval)
-  }, [campaignId])
+  }, [campaignId, pollStops])
 
   /**
    * Batched Places scrape: POST in a loop until `done`; stops when scrape finished or route blocks.

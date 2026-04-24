@@ -20,18 +20,14 @@ export async function POST(req: Request) {
     const supabase = await createServerClient()
 
     const {
-      data: { user: sessionUser },
-      error: authError,
+      data: { user },
     } = await supabase.auth.getUser()
 
-    console.log("[scrape-batch] user id:", sessionUser?.id ?? "(none)")
-    console.log("[scrape-batch] auth error:", authError?.message ?? "(none)")
+    console.log("[SCRAPER PROD] user:", user?.id)
 
-    if (!sessionUser?.id) {
-      return NextResponse.json(
-        { ok: false, error: "Not authenticated" },
-        { status: 401 }
-      )
+    if (!user) {
+      console.log("[ERROR] No user in production")
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
     const { searchParams } = new URL(req.url)
@@ -51,7 +47,7 @@ export async function POST(req: Request) {
       .from("campaigns")
       .select("*")
       .eq("id", campaignId)
-      .eq("user_id", sessionUser.id)
+      .eq("user_id", user.id)
       .maybeSingle()
 
     console.log(
@@ -124,7 +120,7 @@ export async function POST(req: Request) {
           .from("campaigns")
           .update({ status: "running" })
           .eq("id", campaignId)
-          .eq("user_id", sessionUser.id)
+          .eq("user_id", user.id)
 
         console.log("[scrape] status→running update error:", runUpdErr?.message ?? "(none)")
       }
@@ -154,7 +150,7 @@ export async function POST(req: Request) {
       const result = await runCampaignScrapeBatch({
         supabase,
         campaignId,
-        userId: sessionUser.id,
+        userId: user.id,
         apiKey,
       })
 
