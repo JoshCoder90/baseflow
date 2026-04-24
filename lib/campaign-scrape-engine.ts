@@ -78,7 +78,7 @@ export type CampaignScrapeCheckpoint = {
   textQueries: string[]
   textPageToken: string | null
   textPageNum: number
-  postPhase: "none" | "contact_fetch" | "hunter_trim" | "done"
+  postPhase: "none" | "hunter_trim" | "done"
   contactFetchOffset: number
   /** Cumulative Google Maps HTTP calls for this campaign scrape (checkpointed across batches). */
   apiCalls?: number
@@ -148,13 +148,6 @@ function domainFromWebsiteUrl(website: string | null): string | null {
   } catch {
     return null
   }
-}
-
-function rowNeedsContactFetch(row: { email?: unknown; place_id?: unknown }): boolean {
-  const pid = row.place_id
-  if (typeof pid !== "string" || !pid.trim()) return false
-  const em = row.email
-  return !(typeof em === "string" && em.trim().length > 0)
 }
 
 async function trimLeadRowsToCap(
@@ -659,6 +652,9 @@ export async function runCampaignScrapeBatch(params: {
     }
   } else {
     checkpoint = checkpointFromDb
+    if ((checkpoint as { postPhase?: string }).postPhase === "contact_fetch") {
+      checkpoint.postPhase = "hunter_trim"
+    }
   }
   const ctx: CampaignCtx = {
     campaignId,
@@ -669,6 +665,22 @@ export async function runCampaignScrapeBatch(params: {
   }
 
   const genCtx: GenCtx = { mode: "campaign", campaignId }
+  let emailLeadsInCampaign = await countEmailLeadsForContext(supabase, genCtx)
+
+  async function maybeSyncCampaignUI(totalLeads: number, emailCount: number): Promise<void> {
+    if (totalLeads % 5 !== 0) return
+    const { error } = await supabase
+      .from("campaigns")
+      .update({
+        leads_found: totalLeads,
+        emails_found: emailCount,
+      })
+      .eq("id", campaignId)
+      .eq("user_id", userId)
+    if (error) {
+      console.log("[scrape] campaigns leads_found/emails_found update:", error.message)
+    }
+  }
 
   async function assertCampaignExists(): Promise<boolean> {
     const { data } = await supabase
@@ -756,24 +768,28 @@ export async function runCampaignScrapeBatch(params: {
     if (buf.length === 0) return 0
     let inserted = 0
     const chunk = buf.splice(0, BATCH_SIZE)
-    const validPlaces = chunk.filter(
-      (p) => Boolean(p.website) || Boolean(p.formatted_address)
-    )
-    const invalidPlaces = chunk.filter(
-      (p) => !p.website && !p.formatted_address
-    )
-    const enrichedFromValid = await Promise.all(
-      validPlaces.map(async (place) => {
+    const enriched = await Promise.all(
+      chunk.map(async (place) => {
+        if (!place.place_id) {
+          return {
+            place,
+            website: null as string | null,
+            email: null as string | null,
+            guessedEmail: null as string | null,
+            phone: null as string | null,
+            skip: true,
+          }
+        }
         try {
           const { website, email, guessedEmail, phone } = await fetchWebsiteAndEmailForPlace(
-            place.place_id!,
+            place.place_id,
             apiKey,
             {
               knownWebsite: place.website,
               beforeDetailCall: consumeGoogleApiCall,
             }
           )
-          return { place, website, email, guessedEmail, phone }
+          return { place, website, email, guessedEmail, phone, skip: false }
         } catch {
           return {
             place,
@@ -781,26 +797,11 @@ export async function runCampaignScrapeBatch(params: {
             email: null,
             guessedEmail: null,
             phone: null,
+            skip: false,
           }
         }
       })
     )
-    const enriched: {
-      place: PlaceResult
-      website: string | null
-      email: string | null
-      guessedEmail: string | null
-      phone: string | null
-    }[] = [
-      ...enrichedFromValid,
-      ...invalidPlaces.map((p) => ({
-        place: p,
-        website: null as string | null,
-        email: null as string | null,
-        guessedEmail: null as string | null,
-        phone: null as string | null,
-      })),
-    ]
     enriched.sort((a, b) => {
       const score = (w: string | null) => (w?.trim() ? 1 : 0)
       return score(b.website) - score(a.website)
@@ -812,7 +813,9 @@ export async function runCampaignScrapeBatch(params: {
       if (scrapedThisBatch >= insertBudget) break
       if (tryStopCampaignScrape(leadsCollected, checkpoint.rawBusinessesSeen, checkpoint.stopCollecting)) break
 
-      const { place, website, email, guessedEmail, phone } = enriched[i]
+      const e = enriched[i]
+      if (e.skip) continue
+      const { place, website, email, guessedEmail, phone } = e
       const allowedEmail =
         email && isEmailAllowedForCampaignQueue(email) ? email : null
 
@@ -845,6 +848,8 @@ export async function runCampaignScrapeBatch(params: {
         inserted++
         scrapedThisBatch++
         leadsCollected++
+        if (allowedEmail) emailLeadsInCampaign++
+        void maybeSyncCampaignUI(leadsCollected, emailLeadsInCampaign)
         console.log(`Scraped ${scrapedThisBatch} leads`)
         console.log(`Total leads now: ${leadsCollected}`)
       }
@@ -871,24 +876,28 @@ export async function runCampaignScrapeBatch(params: {
       if (tryStopCampaignScrape(leadsCollected, checkpoint.rawBusinessesSeen, checkpoint.stopCollecting)) return
 
       const slice = batch.splice(0, BATCH_SIZE)
-      const validPlaces = slice.filter(
-        (p) => Boolean(p.website) || Boolean(p.formatted_address)
-      )
-      const invalidPlaces = slice.filter(
-        (p) => !p.website && !p.formatted_address
-      )
-      const enrichedFromValid = await Promise.all(
-        validPlaces.map(async (place) => {
+      const enriched = await Promise.all(
+        slice.map(async (place) => {
+          if (!place.place_id) {
+            return {
+              place,
+              website: null as string | null,
+              email: null as string | null,
+              guessedEmail: null as string | null,
+              phone: null as string | null,
+              skip: true,
+            }
+          }
           try {
             const { website, email, guessedEmail, phone } = await fetchWebsiteAndEmailForPlace(
-              place.place_id!,
+              place.place_id,
               apiKey,
               {
                 knownWebsite: place.website,
                 beforeDetailCall: consumeGoogleApiCall,
               }
             )
-            return { place, website, email, guessedEmail, phone }
+            return { place, website, email, guessedEmail, phone, skip: false }
           } catch {
             return {
               place,
@@ -896,20 +905,11 @@ export async function runCampaignScrapeBatch(params: {
               email: null,
               guessedEmail: null,
               phone: null,
+              skip: false,
             }
           }
         })
       )
-      const enriched = [
-        ...enrichedFromValid,
-        ...invalidPlaces.map((p) => ({
-          place: p,
-          website: null as string | null,
-          email: null as string | null,
-          guessedEmail: null as string | null,
-          phone: null as string | null,
-        })),
-      ]
       enriched.sort((a, b) => {
         const score = (w: string | null) => (w?.trim() ? 1 : 0)
         return score(b.website) - score(a.website)
@@ -920,7 +920,9 @@ export async function runCampaignScrapeBatch(params: {
         leadsCollected = await getLeadCount(supabase, campaignId)
         if (tryStopCampaignScrape(leadsCollected, checkpoint.rawBusinessesSeen, checkpoint.stopCollecting)) return
 
-        const { place, website, email, guessedEmail, phone } = enriched[i]
+        const e = enriched[i]
+        if (e.skip) continue
+        const { place, website, email, guessedEmail, phone } = e
         const allowedEmail =
           email && isEmailAllowedForCampaignQueue(email) ? email : null
         const row: LeadRowInput = {
@@ -950,6 +952,8 @@ export async function runCampaignScrapeBatch(params: {
         if (ins) {
           scrapedThisBatch++
           leadsCollected++
+          if (allowedEmail) emailLeadsInCampaign++
+          void maybeSyncCampaignUI(leadsCollected, emailLeadsInCampaign)
           console.log(`Scraped ${scrapedThisBatch} leads`)
           console.log(`Total leads now: ${leadsCollected}`)
         }
@@ -1330,79 +1334,11 @@ export async function runCampaignScrapeBatch(params: {
     checkpoint.stopCollecting = false
   }
 
-  /** ---------- Contact fetch (batched) ---------- */
   let emailLeadsNow = await countEmailLeadsForContext(supabase, genCtx)
   let totalLeadsNow = await getLeadCount(supabase, campaignId)
 
-  if (
-    checkpoint.collectPhase === "collection_done" &&
-    checkpoint.postPhase === "none" &&
-    totalLeadsNow > 0
-  ) {
-    checkpoint.postPhase = "contact_fetch"
-    checkpoint.contactFetchOffset = 0
-  }
-
-  if (
-    checkpoint.collectPhase === "collection_done" &&
-    checkpoint.postPhase === "none" &&
-    totalLeadsNow === 0
-  ) {
+  if (checkpoint.collectPhase === "collection_done" && checkpoint.postPhase === "none") {
     checkpoint.postPhase = "hunter_trim"
-  }
-
-  if (checkpoint.postPhase === "contact_fetch") {
-    await supabase
-      .from("campaigns")
-      .update({ lead_generation_stage: "enriching" })
-      .eq("id", campaignId)
-      .eq("user_id", userId)
-
-    const { data: rows } = await supabase
-      .from("leads")
-      .select("id, place_id, email, website")
-      .eq("campaign_id", campaignId)
-
-    const needsEnrich = (rows || []).filter((r) => rowNeedsContactFetch(r))
-    const chunk = needsEnrich.slice(checkpoint.contactFetchOffset, checkpoint.contactFetchOffset + BATCH_SIZE)
-
-    if (!checkpoint.stopCollecting) {
-      await Promise.all(
-        chunk.map(async (row) => {
-          try {
-            const rowWebsite =
-              typeof row.website === "string" && row.website.trim().length > 0
-                ? row.website.trim()
-                : null
-            const { website, email, guessedEmail, phone } = await fetchWebsiteAndEmailForPlace(
-              row.place_id as string,
-              apiKey,
-              {
-                knownWebsite: rowWebsite,
-                beforeDetailCall: consumeGoogleApiCall,
-              }
-            )
-            if (!website?.trim() && !email?.trim() && !guessedEmail?.trim() && !phone?.trim()) return
-
-            const updatePayload: Record<string, unknown> = {
-              website: website || null,
-              email: email || null,
-              guessed_email: guessedEmail ?? null,
-            }
-            if (phone) updatePayload.phone = phone
-
-            await supabase.from("leads").update(updatePayload).eq("id", row.id as string)
-          } catch {
-            /* skip */
-          }
-        })
-      )
-    }
-
-    checkpoint.contactFetchOffset += chunk.length
-    if (checkpoint.contactFetchOffset >= needsEnrich.length) {
-      checkpoint.postPhase = "hunter_trim"
-    }
   }
 
   /** ---------- Hunter + trim + finalize ---------- */
@@ -1421,6 +1357,8 @@ export async function runCampaignScrapeBatch(params: {
         lead_generation_stage: "complete",
         scrape_checkpoint: null,
         status: "completed",
+        leads_found: totalLeadsNow,
+        emails_found: emailLeadsNow,
       })
       .eq("id", campaignId)
       .eq("user_id", userId)
