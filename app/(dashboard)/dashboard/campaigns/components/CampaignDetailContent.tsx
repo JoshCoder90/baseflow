@@ -1,9 +1,8 @@
 "use client"
 
-import { useState, useEffect, useRef, useCallback } from "react"
+import { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { useRouter } from "next/navigation"
 import { supabase } from "@/lib/supabase"
-import { CampaignStatusBadge } from "./CampaignStatusBadge"
 import { CampaignDetailsEditor } from "./CampaignDetailsEditor"
 import { CampaignNotes } from "./CampaignNotes"
 import { CampaignLeadsTable } from "./CampaignLeadsTable"
@@ -11,7 +10,7 @@ import { MessageFormatTab } from "./MessageFormatTab"
 import { CampaignRepliesTab } from "./CampaignRepliesTab"
 import { CampaignQueueTab, type CampaignQueueMessageRow } from "./CampaignQueueTab"
 import { ScrapingProgressBar } from "./ScrapingProgressBar"
-import { contactKeyForCampaignLead, MAX_LEADS_PER_CAMPAIGN } from "@/lib/campaign-leads-insert"
+import { MAX_LEADS_PER_CAMPAIGN } from "@/lib/campaign-leads-insert"
 import type { CampaignQueueStats } from "@/lib/get-campaign-stats"
 import { getCampaignStats } from "@/lib/get-campaign-stats"
 
@@ -39,6 +38,8 @@ type Campaign = {
 
 type Props = {
   campaign: Campaign
+  /** When true (e.g. redirect from “Find emails” on create), run scrape loop once without an extra click. */
+  autoStartScrape?: boolean
 }
 
 type Lead = {
@@ -120,19 +121,38 @@ async function loadLeadsAndQueueFromClient(
     if (chunk.length < LEADS_PAGE) break
   }
 
-  const { data: queueList, error: qErr } = await supabase
+  const { data: queuedMessages, error: qErr } = await supabase
     .from("campaign_messages")
-    .select(
-      "id, lead_id, campaign_id, step_number, status, next_send_at, sent_at, message_body"
-    )
+    .select("*")
     .eq("campaign_id", campaignId)
-    .order("id", { ascending: true })
+    .in("status", ["queued", "pending", "sending"])
+    .order("created_at", { ascending: true })
+
+  console.log("QUEUE DATA:", queuedMessages)
+
+  if (!queuedMessages?.length) {
+    const { data: queueDebugNoStatusFilter } = await supabase
+      .from("campaign_messages")
+      .select("id, lead_id, status, created_at")
+      .eq("campaign_id", campaignId)
+      .order("created_at", { ascending: true })
+    console.log("QUEUE DEBUG (no status filter):", queueDebugNoStatusFilter)
+  }
 
   if (qErr) {
     console.error("[loadLeadsAndQueueFromClient] campaign_messages", qErr)
   }
-  const queueListSafe = (queueList ?? []) as Record<string, unknown>[]
-  const leadIds = [...new Set(queueListSafe.map((m) => m.lead_id as string))]
+  const knownLeadIds = new Set(rows.map((r) => String(r.id)))
+  const queueListSafe = (
+    (queuedMessages ?? []) as Record<string, unknown>[]
+  ).filter((m) => knownLeadIds.has(String(m.lead_id ?? "")))
+  const leadIds = [
+    ...new Set(
+      queueListSafe
+        .map((m) => m.lead_id as string | undefined)
+        .filter((id): id is string => typeof id === "string" && id.length > 0)
+    ),
+  ]
 
   let queueMessages: CampaignQueueMessageRow[] = []
   if (leadIds.length > 0) {
@@ -155,12 +175,14 @@ async function loadLeadsAndQueueFromClient(
     queueMessages = queueListSafe as unknown as CampaignQueueMessageRow[]
   }
 
-  const queueStats = await getCampaignStats(supabase, campaignId)
+  const queueStatsFromDb = await getCampaignStats(supabase, campaignId)
+  const leadsTotalCount = rows.length
+  const notSent = Math.max(0, leadsTotalCount - queueStatsFromDb.sent)
 
   return {
     leads: rows.map((raw) => normalizeLead(raw)),
     queueMessages,
-    queueStats,
+    queueStats: { ...queueStatsFromDb, notSent },
   }
 }
 
@@ -199,7 +221,10 @@ function CampaignStatsLoadingSkeleton() {
   )
 }
 
-export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
+export function CampaignDetailContent({
+  campaign: initialCampaign,
+  autoStartScrape = false,
+}: Props) {
   const router = useRouter()
   const [apiPatch, setApiPatch] = useState<Partial<Campaign> | null>(null)
   /** Live `campaigns` row fields from `/api/get-campaign` + Realtime (single source for UI). */
@@ -220,10 +245,17 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
     setApiPatch(null)
   }, [campaignId])
 
+  useEffect(() => {
+    autoScrapeMemoryLockRef.current = false
+  }, [campaignId])
+
   /** Idle until click; "starting" = HTTP in flight; "awaiting_active" = OK, waiting until campaign is live/completed. */
   const [startSendingUi, setStartSendingUi] = useState<
     "idle" | "starting" | "awaiting_active"
   >("idle")
+  const [scrapeUi, setScrapeUi] = useState<"idle" | "running">("idle")
+  /** When `sessionStorage` is unavailable, prevents React Strict Mode from starting two scrapes. */
+  const autoScrapeMemoryLockRef = useRef(false)
   const [isStopping, setIsStopping] = useState(false)
 
   const [isEditing, setIsEditing] = useState(false)
@@ -255,7 +287,7 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
   useEffect(() => {
     if (startSendingUi !== "awaiting_active") return
     const s = (liveCampaign.status ?? campaign.status ?? "draft").toLowerCase()
-    if (s === "active" || s === "sending" || s === "completed") {
+    if (s === "active" || s === "sending") {
       setStartSendingUi("idle")
     }
   }, [startSendingUi, liveCampaign.status, campaign.status])
@@ -270,6 +302,12 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
   const fetchCampaignData = useCallback(async () => {
     const id = campaignId
     try {
+      await fetch(`/api/campaigns/${encodeURIComponent(campaignId)}/cleanup-queue`, {
+        method: "POST",
+      }).catch(() => {
+        /* non-fatal */
+      })
+
       const res = await fetch(
         `/api/get-campaign?id=${encodeURIComponent(campaignId)}`,
         { cache: "no-store" }
@@ -343,16 +381,24 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
   const fetchCampaignDataRef = useRef(fetchCampaignData)
   fetchCampaignDataRef.current = fetchCampaignData
 
-  const pollStops = (liveCampaign.status ?? campaign.status ?? "")
-    .toLowerCase() === "completed"
+  /** Stop status polling only after sending is fully done — scrape `completed` still needs live updates. */
+  const pollStops = useMemo(() => {
+    const st = (liveCampaign.status ?? campaign.status ?? "").toLowerCase()
+    if (st !== "completed") return false
+    const lt = leadsForThisCampaign.length
+    const s = queueStats.sent
+    const ns = Math.max(0, lt - s)
+    return s > 0 && ns === 0
+  }, [liveCampaign.status, campaign.status, leadsForThisCampaign.length, queueStats.sent])
+
   /**
-   * Light poll: `/api/get-campaign` every 2s for live status + row fields. Stops when `completed` (leads/queue: Realtime + `fetchCampaignData`).
+   * Light poll: `/api/get-campaign` every 2s for live row fields until sending is complete.
    */
   useEffect(() => {
     if (!campaignId) return
     if (pollStops) return
-    const interval = setInterval(async () => {
-      if ((statusRef.current ?? "").toLowerCase() === "completed") return
+    console.log("Campaign loaded once — no polling")
+    void (async () => {
       const res = await fetch(
         `/api/get-campaign?id=${encodeURIComponent(campaignId)}`
       )
@@ -372,46 +418,12 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
               ? Number(lf)
               : prev.leads_found,
       }))
-    }, CAMPAIGN_STATUS_POLL_MS)
-    return () => clearInterval(interval)
+    })()
   }, [campaignId, pollStops])
 
-  /**
-   * Batched Places scrape: POST in a loop until `done`; stops when scrape finished or route blocks.
-   * Scrape loop does not gate on SSR props beyond `campaign.id`.
-   */
   useEffect(() => {
-    if (!campaign?.id) return
-
-    const campaignId = campaign.id
-    let cancelled = false
-
-    async function startScrapingLoop() {
-      let done = false
-      while (!cancelled && !done) {
-        const res = await fetch(
-          `/api/scrape-batch?id=${encodeURIComponent(campaignId)}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-          }
-        )
-        const data = (await res.json()) as { done?: boolean }
-        void fetchCampaignDataRef.current()
-        done = Boolean(data.done)
-        if (done) {
-          console.log("SCRAPING COMPLETE - STOPPING LOOP")
-          break
-        }
-        await new Promise((r) => setTimeout(r, 100))
-      }
-    }
-
-    void startScrapingLoop()
-    return () => {
-      cancelled = true
-    }
-  }, [campaign?.id])
+    console.log("Manual trigger only - no auto run")
+  }, [])
 
   /** Refresh queue/stats when campaign_messages change (sends complete in background). */
   useEffect(() => {
@@ -521,10 +533,14 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
   const targetLabel = getTargetLabel(campaign)
 
   const handleStartSending = async () => {
+    if (!canStartSending && !canResumeSending) {
+      await handleStartScraping()
+      return
+    }
     if (startSendingUi !== "idle") return
     setStartSendingUi("starting")
     try {
-      const res = await fetch(`/api/campaigns/${campaign.id}/start-sending`, {
+      const res = await fetch(`/api/campaigns/${encodeURIComponent(campaign.id)}/start-sending`, {
         method: "POST",
       })
 
@@ -543,6 +559,61 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
       setStartSendingUi("idle")
     }
   }
+
+  const handleStartScraping = useCallback(async () => {
+    if (scrapeUi !== "idle") return
+    setScrapeUi("running")
+    try {
+      let done = false
+      while (!done) {
+        const res = await fetch(
+          `/api/scrape-batch?id=${encodeURIComponent(campaign.id)}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+          }
+        )
+        const data = (await res.json()) as { done?: boolean }
+        void fetchCampaignDataRef.current()
+        done = Boolean(data.done)
+        if (!res.ok) break
+        if (!done) {
+          await new Promise((r) => setTimeout(r, 55))
+        }
+      }
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setScrapeUi("idle")
+      void fetchCampaignDataRef.current()
+    }
+  }, [scrapeUi, campaign.id])
+
+  const handleStartScrapingRef = useRef(handleStartScraping)
+  handleStartScrapingRef.current = handleStartScraping
+
+  /** After “Find emails” on create (`?startScrape=1`), run the same scrape loop once — no extra “Start Campaign” click. */
+  useEffect(() => {
+    if (!autoStartScrape || !campaign.target_search_query?.trim()) return
+
+    const storageKey = `bf-campaign-autoscrape-${campaignId}`
+    try {
+      if (typeof sessionStorage !== "undefined" && sessionStorage.getItem(storageKey)) {
+        return
+      }
+      if (typeof sessionStorage !== "undefined") {
+        sessionStorage.setItem(storageKey, "1")
+      }
+    } catch {
+      /* ignore private mode */
+    }
+
+    if (autoScrapeMemoryLockRef.current) return
+    autoScrapeMemoryLockRef.current = true
+
+    router.replace(`/dashboard/campaigns/${campaignId}`, { scroll: false })
+    void handleStartScrapingRef.current()
+  }, [autoStartScrape, campaign.target_search_query, campaignId, router])
 
   const handleStopCampaign = async () => {
     try {
@@ -591,43 +662,55 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
     MAX_LEADS_PER_CAMPAIGN
   )
   const safeLeads = Array.isArray(leadsForThisCampaign) ? leadsForThisCampaign : []
-  const uniqueLeads = safeLeads.filter((lead, index, self) => {
-    const key = contactKeyForCampaignLead(lead)
-    return index === self.findIndex((l) => contactKeyForCampaignLead(l) === key)
-  })
-  /** Deduped cap for send-completion checks; headline stats use DB counts below. */
-  const cappedLeads = uniqueLeads.slice(0, MAX_LEADS_PER_CAMPAIGN)
-
   const statsTotalLeads = safeLeads.length
   const statsEmailsFound = safeLeads.filter(leadHasNonEmptyEmail).length
-  const leadsFound =
-    typeof liveCampaign.leads_found === "number" ? liveCampaign.leads_found : statsTotalLeads
+  /** Prefer loaded row count from Supabase (updates every lead via Realtime); DB `leads_found` syncs in batches of ~5–15. */
+  const leadsFound = Math.max(
+    statsTotalLeads,
+    typeof liveCampaign.leads_found === "number" ? liveCampaign.leads_found : 0
+  )
 
   const scrapeProgressPercent =
     targetCap > 0 ? Math.min((leadsFound / targetCap) * 100, 100) : 0
   const emailsFound = statsEmailsFound
+  const sent = queueStats.sent
+  const leadsTotal = statsTotalLeads
+  const notSent = Math.max(0, leadsTotal - sent)
+
   const dbStatus = (liveCampaign.status ?? campaign.status ?? "draft").toLowerCase()
-  const isScraping = !!(showLeadSection && dbStatus === "running")
+  const isScraping = !!(
+    showLeadSection && (dbStatus === "running" || dbStatus === "scraping")
+  )
+  /** Local scrape loop running before `campaigns.status` flips (e.g. right after “Find emails”). */
+  const scrapeUiBusy = scrapeUi === "running"
   const missingEmailCount = Math.max(0, statsTotalLeads - statsEmailsFound)
-  const isEnrichingUi = isScraping && statsEmailsFound >= targetCap && missingEmailCount > 0
+  const isEnrichingUi =
+    dbStatus === "enriching" ||
+    (isScraping && statsEmailsFound >= targetCap && missingEmailCount > 0)
   const emailRate =
     statsTotalLeads > 0
       ? Math.round((statsEmailsFound / statsTotalLeads) * 100)
       : 0
-  const isReady = statsTotalLeads > 0 && statsEmailsFound > 0 && !isScraping
-  const leadsWithEmail = cappedLeads.filter(leadHasNonEmptyEmail)
-  const allEmailLeadsSent =
-    leadsWithEmail.length > 0 &&
-    leadsWithEmail.every((l) => l.status === "sent")
-  const isCampaignCompleted = dbStatus === "completed" || allEmailLeadsSent
-  const campaignIsLive =
-    !isCampaignCompleted && (dbStatus === "active" || dbStatus === "sending")
-  const canStartOrResume =
-    !isCampaignCompleted &&
-    (isReady || dbStatus === "paused" || dbStatus === "stopped")
-  /** Badge label for non-running / non-completed `campaigns.status` values. */
-  const otherStatusBadge =
-    dbStatus !== "running" && dbStatus !== "completed" ? dbStatus : "draft"
+  /** All outbound messages delivered (do not conflate with scrape-only `campaigns.status === "completed"`). */
+  const sendingComplete = sent > 0 && notSent === 0
+  const campaignIsLive = dbStatus === "active" || dbStatus === "sending"
+  const canStartSending = leadsTotal > 0 && emailsFound > 0 && sent === 0
+  const canResumeSending =
+    (dbStatus === "paused" || dbStatus === "stopped") && !campaignIsLive && !sendingComplete
+  const activitySpotLabel = campaignIsLive
+    ? "Active"
+    : sendingComplete
+      ? "Completed"
+      : dbStatus === "completed" && sent === 0
+        ? "Ready"
+        : "Idle"
+
+  console.log({
+    status: campaign.status,
+    leadsTotal,
+    emailsFound,
+    sent,
+  })
 
   return (
     <div className="space-y-6">
@@ -654,11 +737,19 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
           </div>
           <div className="rounded-xl border border-zinc-700/60 bg-zinc-800/40 p-5">
             <p className="text-xs font-medium uppercase tracking-wider text-zinc-500 mb-1">Status</p>
-            <div className="flex flex-wrap items-center gap-2">
-              {dbStatus === "running" && <CampaignStatusBadge status="running" />}
-              {dbStatus === "completed" && <CampaignStatusBadge status="completed" />}
-              {dbStatus !== "running" && dbStatus !== "completed" && (
-                <CampaignStatusBadge status={otherStatusBadge} />
+            <div className="space-y-2">
+              <p className="text-sm text-zinc-200">
+                {dbStatus === "scraping" && "Finding leads..."}
+                {dbStatus === "enriching" && "Finding emails..."}
+                {dbStatus === "completed" && "Complete"}
+                {dbStatus === "running" && (showLeadSection ? "Finding leads..." : "Running")}
+                {!["scraping", "enriching", "completed", "running"].includes(dbStatus) &&
+                  (liveCampaign.status ?? campaign.status ?? "—")}
+              </p>
+              {(campaignIsLive || isScraping || isEnrichingUi) && !sendingComplete && (
+                <span className="inline-flex items-center rounded-full border border-sky-500/30 bg-sky-500/15 px-2.5 py-0.5 text-xs font-medium text-sky-300">
+                  Running
+                </span>
               )}
             </div>
           </div>
@@ -669,24 +760,29 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
           target={targetCap}
           progressPercent={scrapeProgressPercent}
           statusMessage={
-            showLeadSection && dbStatus === "running"
-              ? leadsFound < targetCap
-                ? leadsFound === 0
-                  ? (
-                      <div className="flex items-center gap-2 text-sm text-gray-400">
-                        <span>Finding businesses and leads</span>
-                        <div className="flex gap-1">
-                          <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:0ms]" />
-                          <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:150ms]" />
-                          <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:300ms]" />
+            showLeadSection && dbStatus === "enriching"
+              ? "Finding email addresses for remaining leads..."
+              : showLeadSection &&
+                  (dbStatus === "running" ||
+                    dbStatus === "scraping" ||
+                    scrapeUiBusy)
+                ? leadsFound < targetCap
+                  ? leadsFound === 0
+                    ? (
+                        <div className="flex items-center gap-2 text-sm text-gray-400">
+                          <span>Finding businesses and leads</span>
+                          <div className="flex gap-1">
+                            <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:0ms]" />
+                            <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:150ms]" />
+                            <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:300ms]" />
+                          </div>
                         </div>
-                      </div>
-                    )
-                  : `Found ${leadsFound} leads...`
-                : missingEmailCount > 0
-                  ? "Finding email addresses for remaining leads..."
-                  : "Scraping complete"
-              : null
+                      )
+                    : `Found ${leadsFound} leads...`
+                  : missingEmailCount > 0
+                    ? "Finding email addresses for remaining leads..."
+                    : "Scraping complete"
+                : null
           }
         />
 
@@ -703,16 +799,34 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
             </p>
             <p
               className={`text-xs mt-1 ${
-                isEnrichingUi ? "text-yellow-400" : isScraping ? "text-zinc-400" : "text-green-400"
+                isEnrichingUi
+                  ? "text-yellow-400"
+                  : isScraping || scrapeUiBusy
+                    ? "text-zinc-400"
+                    : statsTotalLeads === 0
+                      ? "text-zinc-500"
+                      : "text-green-400"
               }`}
             >
-              {isEnrichingUi
-                ? "Scraping emails…"
-                : isScraping
-                  ? statsEmailsFound < targetCap
-                    ? "Finding businesses and emails…"
-                    : "Scraping complete"
-                  : "Scraping complete"}
+              {isEnrichingUi ? (
+                "Scraping emails…"
+              ) : isScraping || scrapeUiBusy ? (
+                statsEmailsFound < targetCap ? (
+                  "Finding businesses and emails…"
+                ) : (
+                  "Scraping complete"
+                )
+              ) : statsTotalLeads === 0 ? (
+                ["draft", "paused"].includes(dbStatus) ? (
+                  "No leads yet — run lead search above or start below."
+                ) : dbStatus === "completed" ? (
+                  "Search finished — no leads matched."
+                ) : (
+                  "No leads loaded yet."
+                )
+              ) : (
+                "Lead data ready"
+              )}
             </p>
           </div>
         </div>
@@ -723,14 +837,16 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
           <h2 className="text-lg font-semibold text-white">Campaign Activity</h2>
           <span
             className={`text-sm px-3 py-1 rounded-full ${
-              isCampaignCompleted
+              sendingComplete
                 ? "bg-zinc-600/40 text-zinc-300"
                 : campaignIsLive
                   ? "bg-green-500/20 text-green-400"
-                  : "bg-zinc-600/40 text-zinc-400"
+                  : dbStatus === "completed" && sent === 0
+                    ? "bg-sky-500/15 text-sky-300"
+                    : "bg-zinc-600/40 text-zinc-400"
             }`}
           >
-            {isCampaignCompleted ? "Completed" : campaignIsLive ? "Active" : "Idle"}
+            {activitySpotLabel}
           </span>
         </div>
 
@@ -747,9 +863,7 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
 
           <div className="bg-black/30 rounded-xl p-4">
             <div className="text-xs text-gray-400">Not Sent</div>
-            <div className="text-2xl font-bold text-yellow-400">
-              {queueStats.notSent}
-            </div>
+            <div className="text-2xl font-bold text-yellow-400">{notSent}</div>
           </div>
 
           <div className="bg-black/30 rounded-xl p-4">
@@ -761,19 +875,19 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
             <div className="text-xs text-gray-400">Status</div>
             <div
               className={`text-2xl font-bold ${
-                isCampaignCompleted ? "text-zinc-300" : queueStats.sent > 0 ? "text-green-400" : "text-zinc-400"
+                sendingComplete ? "text-zinc-300" : queueStats.sent > 0 ? "text-green-400" : "text-zinc-400"
               }`}
             >
-              {isCampaignCompleted ? "Completed" : queueStats.sent > 0 ? "Sending" : "Ready"}
+              {sendingComplete ? "Completed" : queueStats.sent > 0 ? "Sending" : "Ready"}
             </div>
           </div>
         </div>
       </div>
 
-      {isCampaignCompleted && (
+      {sent > 0 && notSent === 0 && (
         <p className="text-sm text-zinc-300">All emails sent</p>
       )}
-      {!isCampaignCompleted && queueStats.sent > 0 && (
+      {!sendingComplete && queueStats.sent > 0 && (
         <p className="text-sm text-green-400">Sent {queueStats.sent} emails</p>
       )}
       {startSendingUi === "starting" && (
@@ -795,11 +909,14 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
             {isStopping ? "Stopping…" : "Stop Campaign"}
           </button>
         )}
-        {!campaignIsLive && !isCampaignCompleted && (
+        {(canStartSending || canResumeSending) && !campaignIsLive && (
           <button
             type="button"
             onClick={handleStartSending}
-            disabled={!canStartOrResume || startSendingUi !== "idle"}
+            disabled={
+              startSendingUi !== "idle" ||
+              (!canResumeSending && (isScraping || isEnrichingUi))
+            }
             aria-busy={startSendingUi !== "idle"}
             className="bg-green-500 px-4 py-2 rounded font-medium text-sm text-white hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none transition"
           >
@@ -810,8 +927,20 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
                 : "Start Sending Messages"}
           </button>
         )}
-        {!canStartOrResume && startSendingUi === "idle" && !isCampaignCompleted && (
-          <p className="text-sm text-yellow-400">Finish scraping emails before sending</p>
+        {!(canStartSending || canResumeSending) &&
+          startSendingUi === "idle" &&
+          !campaignIsLive &&
+          !sendingComplete && (
+          <button
+            type="button"
+            onClick={handleStartSending}
+            disabled={scrapeUi !== "idle" || isScraping || isEnrichingUi}
+            className="bg-blue-600 px-4 py-2 rounded font-medium text-sm text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition"
+          >
+            {scrapeUi === "running" || isScraping || isEnrichingUi
+              ? "Scraping..."
+              : "Start Campaign"}
+          </button>
         )}
       </div>
         </>
@@ -855,9 +984,19 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
               campaignId={campaign.id}
               leads={leadsForThisCampaign}
               loading={leadsLoading}
-              isGenerating={!!(showLeadSection && dbStatus === "running")}
-              onLeadAdded={(lead) => setLeadsForThisCampaign((prev) => [...prev, lead])}
-              onLeadDeleted={(leadId) => setLeadsForThisCampaign((prev) => prev.filter((l) => l.id !== leadId))}
+              isGenerating={!!(
+                showLeadSection &&
+                (dbStatus === "running" || dbStatus === "scraping" || dbStatus === "enriching")
+              )}
+              onLeadAdded={(lead) => {
+                setLeadsForThisCampaign((prev) => [...prev, lead])
+                void fetchCampaignDataRef.current()
+              }}
+              onLeadDeleted={(leadId) => {
+                setLeadsForThisCampaign((prev) => prev.filter((l) => l.id !== leadId))
+                setQueueMessages((prev) => prev.filter((m) => m.lead_id !== leadId))
+                void fetchCampaignDataRef.current()
+              }}
             />
           </div>
           <div className={activeTab === "stats" ? "block" : "hidden"}>
@@ -897,6 +1036,7 @@ export function CampaignDetailContent({ campaign: initialCampaign }: Props) {
               queueStats={queueStats}
               loading={leadsLoading}
               campaignStatus={dbStatus}
+              onSendComplete={() => void fetchCampaignDataRef.current()}
             />
           </div>
         </div>

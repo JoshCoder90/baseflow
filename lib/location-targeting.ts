@@ -130,7 +130,10 @@ export function isNearbyPlaceInTargetRegion(
 
   const dFromCampaign = haversineMeters(loc, { lat: target.lat, lng: target.lng })
   const kmFromCampaign = dFromCampaign / 1000
-  if (dFromCampaign > METRO_RADIUS_FROM_CAMPAIGN_CENTER_M) {
+  const distance = kmFromCampaign
+  if (!distance || Number.isNaN(distance)) {
+    console.log("[SAFE] skipping distance filter")
+  } else if (distance > 500) {
     console.log(`Rejected: too far (${kmFromCampaign.toFixed(1)} km) — ${name}`)
     return false
   }

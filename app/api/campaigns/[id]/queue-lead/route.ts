@@ -88,7 +88,7 @@ export async function POST(
     }
 
     if (lead.status === "invalid_email") {
-      await supabase.from("leads").update({ status: "cold" }).eq("id", leadId)
+      await supabase.from("leads").update({ status: "pending" }).eq("id", leadId)
     }
 
     if (lead.status === "sent") {
@@ -137,6 +137,7 @@ export async function POST(
         message_body: messageBody,
         send_at: sendAt,
         status: "pending",
+        user_id: user.id,
       })
       if (!insertErr) insertedCount++
     }

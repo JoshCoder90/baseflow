@@ -55,7 +55,7 @@ export async function ensureLeadIdForEmail(
       email,
       name: params.name?.trim() || null,
       company: params.company?.trim() || null,
-      status: "cold",
+      status: "pending",
     })
     .select("id")
     .single()

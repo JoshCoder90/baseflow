@@ -18,17 +18,9 @@ import {
   extractEmailFromFromHeader,
   plainTextBodyFromGmailMessage,
 } from "@/lib/gmail-inbound-parse"
-import { startGmailSyncLoop } from "@/lib/gmail-sync-loop"
 import { bumpConversationLastMessage } from "@/lib/bump-conversation-last-message"
 
 let lastRun = 0
-
-let hasStarted = false
-if (!hasStarted) {
-  hasStarted = true
-  console.log("🚀 STARTING GMAIL SYNC LOOP...")
-  startGmailSyncLoop()
-}
 
 export const dynamic = "force-dynamic"
 
@@ -91,9 +83,6 @@ function cleanEmailReply(body: string) {
  */
 async function handleSync(): Promise<NextResponse> {
   try {
-    console.log("Starting Gmail sync...")
-    console.log("SYNC ROUTE RUNNING")
-
     if (!supabaseServiceKey) {
       return NextResponse.json({ error: "Server misconfigured" }, { status: 500 })
     }
@@ -132,7 +121,26 @@ async function handleSync(): Promise<NextResponse> {
       gmail_replies_synced_at?: string | null
     }
 
-    console.log("Using Gmail connection:", connection.gmail_email)
+    const { count: campaignTotal } = await supabase
+      .from("campaigns")
+      .select("*", { count: "exact", head: true })
+      .eq("user_id", connection.user_id)
+    if ((campaignTotal ?? 0) > 0) {
+      const { count: notCompleted } = await supabase
+        .from("campaigns")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", connection.user_id)
+        .neq("status", "completed")
+      if ((notCompleted ?? 0) === 0) {
+        console.log("[STOP] Gmail sync halted - campaign completed")
+        return NextResponse.json({
+          success: true,
+          skipped: true,
+          reason: "all_campaigns_completed",
+          imported: 0,
+        })
+      }
+    }
 
     let accessToken = connection.access_token as string | undefined
     let reconnectRequired = false
@@ -167,10 +175,6 @@ async function handleSync(): Promise<NextResponse> {
       maxResults: String(MAX_LIST),
     })
     const listUrl = `${GMAIL_LIST}?${listParams.toString()}`
-    console.log("[sync-gmail-replies] gmail.users.messages.list equivalent:", listUrl.split("?")[0], {
-      q: "in:inbox",
-      maxResults: MAX_LIST,
-    })
 
     const listRes = await gmailGetJson(accessToken, listUrl)
     if (!listRes.ok) {
@@ -192,7 +196,6 @@ async function handleSync(): Promise<NextResponse> {
 
     const listPayload = listRes.body as { messages?: { id: string }[]; nextPageToken?: string }
     const messages = listPayload.messages
-    console.log("GMAIL RESPONSE:", messages?.length || 0)
     const rawIds = (listPayload.messages ?? []).map((m) => m.id).filter(Boolean)
     if (rawIds.length === 0) {
       await supabase
@@ -211,13 +214,11 @@ async function handleSync(): Promise<NextResponse> {
       const fullUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(msgId)}?format=full`
       const fullRes = await gmailGetJson(accessToken, fullUrl)
       if (!fullRes.ok) {
-        console.log("[sync-gmail-replies] messages.get failed for id:", msgId, fullRes.status)
         continue
       }
 
       const gm = fullRes.body as GmailMessageFull
       if (!gm.id) {
-        console.log("[sync-gmail-replies] messages.get: missing id")
         continue
       }
 
@@ -230,7 +231,6 @@ async function handleSync(): Promise<NextResponse> {
         .maybeSingle()
 
       if (existingDup) {
-        console.log("Skipping duplicate:", gmailMessageId)
         continue
       }
 
@@ -256,20 +256,18 @@ async function handleSync(): Promise<NextResponse> {
         body.toLowerCase().includes("not delivered") ||
         body.toLowerCase().includes("couldn't be delivered")
       ) {
-        console.log("Skipping system/bounce email")
+        // silent skip (no log)
         continue
       }
 
       const cleanedBody = cleanEmailReply(body)
 
       if (!threadId) {
-        console.log("[sync-gmail-replies] skip: no Gmail threadId on message", gmailMessageId)
         continue
       }
 
       const myEmail = (connection.gmail_email ?? "").trim().toLowerCase()
       if (fromEmail && myEmail && fromEmail.toLowerCase() === myEmail) {
-        console.log("[sync-gmail-replies] skip: message from connected account (already in CRM send path)")
         continue
       }
 
@@ -284,10 +282,6 @@ async function handleSync(): Promise<NextResponse> {
 
       const anchorLeadId = threadAnchor?.lead_id as string | undefined
       if (!anchorLeadId) {
-        console.log(
-          "[sync-gmail-replies] skip: thread not in CRM (no messages with this thread_id + lead_id)",
-          threadId
-        )
         continue
       }
 
@@ -298,21 +292,10 @@ async function handleSync(): Promise<NextResponse> {
         .maybeSingle()
 
       if (leadOwnErr || !owningLead || owningLead.user_id !== connection.user_id) {
-        console.log(
-          "[sync-gmail-replies] skip: thread lead missing or not owned by this Gmail user",
-          threadId,
-          anchorLeadId
-        )
         continue
       }
 
       const matchedLeadId = anchorLeadId
-
-      if (cleanedBody !== body) {
-        console.log("CLEANING WORKED")
-      } else {
-        console.log("CLEANING FAILED OR NOT USED")
-      }
 
       const messageAt = new Date().toISOString()
       const { error: insErr } = await supabase.from("messages").insert({
@@ -410,7 +393,16 @@ export async function GET(req: Request) {
   const limited = await rateLimitGmailSyncIfNeeded(req)
   if (limited) return limited
 
-  return handleSync()
+  if (isRunning) {
+    console.log("[SYNC BLOCKED] Already running")
+    return NextResponse.json({ skipped: true })
+  }
+  isRunning = true
+  try {
+    return await handleSync()
+  } finally {
+    isRunning = false
+  }
 }
 
 export async function POST(req: Request) {
@@ -421,26 +413,21 @@ export async function POST(req: Request) {
   if (limited) return limited
 
   if (isRunning) {
-    console.log("SYNC BLOCKED — already running");
-    return Response.json({ skipped: true });
+    console.log("[SYNC BLOCKED] Already running")
+    return Response.json({ skipped: true })
   }
 
-  isRunning = true;
+  isRunning = true
 
   try {
-    console.log("SYNC START");
-
-    const now = Date.now();
-    if (now - lastRun < 10000) {
-      console.log("Skipping sync — too soon");
-      return Response.json({ skipped: true });
+    const now = Date.now()
+    if (now - lastRun < 55_000) {
+      return Response.json({ skipped: true, reason: "too_soon" })
     }
-    lastRun = now;
+    lastRun = now
 
-    await handleSync();
-
-    console.log("SYNC END");
-    return Response.json({ success: true });
+    const syncRes = await handleSync()
+    return syncRes
   } catch (err) {
     console.error("SYNC ERROR:", err);
     return Response.json({ error: true });

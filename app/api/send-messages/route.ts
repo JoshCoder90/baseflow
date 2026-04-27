@@ -6,7 +6,10 @@ export async function GET(req: NextRequest) {
   const _rl = rateLimitResponse(req)
   if (_rl) return _rl
 
-  return runQueueHandler(req)
+  return NextResponse.json(
+    { error: "GET disabled. Use manual POST trigger only." },
+    { status: 405 }
+  )
 }
 
 export async function POST(req: NextRequest) {

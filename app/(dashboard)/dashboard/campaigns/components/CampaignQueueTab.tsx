@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { CampaignQueueStats } from "@/lib/get-campaign-stats"
+import { CAMPAIGN_SEND_GAP_MS } from "@/lib/campaign-send-schedule-constants"
 
 export type CampaignQueueMessageRow = {
   id: string
@@ -19,6 +20,8 @@ type Props = {
   queueStats: CampaignQueueStats
   loading?: boolean
   campaignStatus?: string | null
+  /** Called after a send completes so stats / queue rows refetch immediately (Realtime may lag). */
+  onSendComplete?: () => void
 }
 
 /** Naive ISO strings (no Z/offset) are interpreted as UTC so countdown matches server schedule. */
@@ -59,10 +62,13 @@ export function CampaignQueueTab({
   queueStats,
   loading,
   campaignStatus,
+  onSendComplete,
 }: Props) {
   const [tick, setTick] = useState(Date.now())
   const [inflightIds, setInflightIds] = useState<Set<string>>(() => new Set())
   const triggeredRef = useRef<Set<string>>(new Set())
+  /** Server enforces CAMPAIGN_SEND_GAP_MS — block local re-triggers until retry window (avoids spam). */
+  const gapBlockedUntilRef = useRef(0)
 
   const tickMs = useMemo(() => {
     const now = Date.now()
@@ -96,6 +102,7 @@ export function CampaignQueueTab({
         skipped?: boolean
         reason?: string
         error?: string
+        retryAfterMs?: number
       } = {}
       try {
         data = (await res.json()) as typeof data
@@ -105,10 +112,34 @@ export function CampaignQueueTab({
 
       if (res.status === 409 && data?.reason === "campaign_not_active") {
         triggeredRef.current.delete(messageId)
+      } else if (res.status === 429) {
+        /* Rate limit — back off briefly (was HEAVY_ROUTE 10/10s; queue uses a higher bucket). */
+        triggeredRef.current.delete(messageId)
+        gapBlockedUntilRef.current = Math.max(
+          gapBlockedUntilRef.current,
+          Date.now() + 6000
+        )
       } else if (!res.ok && res.status >= 500) {
         triggeredRef.current.delete(messageId)
       } else if (data?.skipped && data?.reason === "claim_failed") {
         /* worker won the row — stop retrying */
+      } else if (data?.skipped && data?.reason === "daily_mailbox_send_cap") {
+        /* cap may be cleared or env changed — allow next poll to retry */
+        triggeredRef.current.delete(messageId)
+      } else if (data?.skipped && data?.reason === "send_gap") {
+        const wait =
+          typeof data.retryAfterMs === "number"
+            ? data.retryAfterMs
+            : CAMPAIGN_SEND_GAP_MS
+        gapBlockedUntilRef.current = Date.now() + wait
+        triggeredRef.current.delete(messageId)
+      } else if (data?.skipped && data?.reason === "send_in_progress") {
+        triggeredRef.current.delete(messageId)
+      }
+
+      if (res.ok && data?.skipped === false) {
+        triggeredRef.current.delete(messageId)
+        onSendComplete?.()
       }
     } catch {
       triggeredRef.current.delete(messageId)
@@ -119,19 +150,34 @@ export function CampaignQueueTab({
         return next
       })
     }
-  }, [])
+  }, [onSendComplete])
 
   const campaignIsActive =
     campaignStatus === "active" || campaignStatus === "sending"
 
   useEffect(() => {
     if (!campaignIsActive) return
-    for (const row of queueMessages) {
-      if (row.status !== "queued" || !row.next_send_at || row.sent_at) continue
-      if (nextSendAtToMs(row.next_send_at) > Date.now()) continue
-      if (triggeredRef.current.has(row.id)) continue
-      void triggerSend(row.id)
-    }
+    if (Date.now() < gapBlockedUntilRef.current) return
+
+    const dueQueued = queueMessages
+      .filter(
+        (row) =>
+          row.status === "queued" &&
+          !!row.next_send_at &&
+          !row.sent_at &&
+          nextSendAtToMs(row.next_send_at) <= Date.now()
+      )
+      .sort(
+        (a, b) =>
+          nextSendAtToMs(a.next_send_at!) -
+            nextSendAtToMs(b.next_send_at!) ||
+          a.id.localeCompare(b.id)
+      )
+
+    const nextRow = dueQueued.find((row) => !triggeredRef.current.has(row.id))
+    if (!nextRow) return
+
+    void triggerSend(nextRow.id)
   }, [tick, queueMessages, campaignIsActive, triggerSend])
 
   const sorted = [...queueMessages].sort((a, b) => {
@@ -157,6 +203,8 @@ export function CampaignQueueTab({
       !m.sent_at
   )
 
+  const gapMsLeftForUi = Math.max(0, gapBlockedUntilRef.current - Date.now())
+
   const nextSendSummary = (() => {
     if (!nextQueued?.next_send_at) {
       return campaignIsActive
@@ -167,6 +215,10 @@ export function CampaignQueueTab({
     }
     if (isDue(nextQueued)) {
       if (!campaignIsActive) return "Paused"
+      if (gapMsLeftForUi > 0 && nextQueued.status === "queued") {
+        const sec = Math.max(1, Math.ceil(gapMsLeftForUi / 1000))
+        return sec < 60 ? `Sending in ${sec}s` : `Sending in ${Math.ceil(sec / 60)}m`
+      }
       if (nextQueued.status === "queued") return "Sending now"
       return "Waiting to queue"
     }
@@ -199,22 +251,35 @@ export function CampaignQueueTab({
       </div>
 
       <div className="space-y-4">
+        {sorted.length === 0 && (
+          <p className="text-sm text-zinc-500">No queued messages.</p>
+        )}
         {sorted.map((row) => {
           const name = row.leads?.name ?? null
           const email = row.leads?.email ?? null
 
           const due = isDue(row)
           const inflight = inflightIds.has(row.id)
+          const inGapCooldown =
+            gapMsLeftForUi > 0 &&
+            (row.status === "queued" || row.status === "pending") &&
+            due
           const showSendingNow =
             row.status === "sending" ||
             inflight ||
-            (campaignIsActive && row.status === "queued" && due)
+            (campaignIsActive &&
+              row.status === "queued" &&
+              due &&
+              !inGapCooldown)
 
           let label: string
           if (row.status === "sent" || row.sent_at) {
             label = "Sent"
           } else if (showSendingNow) {
             label = "Sending now"
+          } else if (inGapCooldown && campaignIsActive) {
+            const sec = Math.max(1, Math.ceil(gapMsLeftForUi / 1000))
+            label = sec < 60 ? `Sending in ${sec}s` : `Sending in ${Math.ceil(sec / 60)}m`
           } else if (row.status === "failed") {
             label = "Failed"
           } else if (row.status === "pending" && !row.next_send_at) {
@@ -258,6 +323,9 @@ export function CampaignQueueTab({
               <div>
                 <div className="text-white">{name || "—"}</div>
                 <div className="text-sm text-gray-400">{email || "—"}</div>
+                <div className="text-xs text-zinc-500 mt-1 font-mono">
+                  Lead: {row.lead_id} — Status: {row.status ?? "—"}
+                </div>
               </div>
 
               <div>{statusLabel}</div>

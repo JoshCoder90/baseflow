@@ -1,14 +1,16 @@
 import type { SupabaseClient } from "@supabase/supabase-js"
+import { deleteOrphanedCampaignMessages } from "@/lib/campaign-messages-cleanup"
 import { isValidEmail } from "@/lib/campaign-message-insert-email"
 import { isEmailAllowedForCampaignQueue } from "@/lib/email-queue-validation"
 import { personalizeMessage } from "@/lib/lead-personalization"
 import { OUTBOUND_EMAIL_CHANNEL } from "@/lib/outbound-channel"
+import { CAMPAIGN_SEND_GAP_MS } from "@/lib/campaign-send-schedule-constants"
 
-/** Time between consecutive scheduled sends for the same campaign (30 seconds). */
-export const CAMPAIGN_SEND_GAP_MS = 30_000
+export { CAMPAIGN_SEND_GAP_MS }
 
 type LeadRow = {
   id: string
+  user_id: string | null
   email: string | null
   name: string | null
   company: string | null
@@ -24,7 +26,7 @@ export async function getLeadsByCampaign(
 ): Promise<LeadRow[]> {
   const { data, error } = await supabase
     .from("leads")
-    .select("id, email, name, company, status")
+    .select("id, user_id, email, name, company, status")
     .eq("campaign_id", campaignId)
     .order("id", { ascending: true })
 
@@ -98,6 +100,7 @@ export async function ensureCampaignMessagesForCampaign(
       send_at: sendAt,
       status: "pending",
       next_send_at: null,
+      user_id: lead.user_id,
     })
 
     if (!insErr) {
@@ -111,6 +114,85 @@ export async function ensureCampaignMessagesForCampaign(
   console.log("[campaign-schedule] Filtered emails:", filteredCount)
 
   return inserted
+}
+
+/**
+ * After a lead is saved (or gains an email), ensure one step-1 `campaign_messages` row exists.
+ * Idempotent; skips leads without a queueable email. Matches {@link ensureCampaignMessagesForCampaign} payload.
+ */
+export async function ensureInitialCampaignMessageForLead(
+  supabase: SupabaseClient,
+  campaignId: string,
+  leadId: string
+): Promise<void> {
+  const { data: existing, error: existingErr } = await supabase
+    .from("campaign_messages")
+    .select("id")
+    .eq("campaign_id", campaignId)
+    .eq("lead_id", leadId)
+    .eq("step_number", 1)
+    .maybeSingle()
+
+  if (existingErr) {
+    console.error("[campaign-schedule] ensureInitial existing:", existingErr)
+    return
+  }
+  if (existing?.id) return
+
+  const { data: lead, error: leadErr } = await supabase
+    .from("leads")
+    .select("id, user_id, email, name, company, status")
+    .eq("id", leadId)
+    .eq("campaign_id", campaignId)
+    .maybeSingle()
+
+  if (leadErr || !lead) return
+
+  const email = typeof lead.email === "string" ? lead.email.trim() : ""
+  if (!email) return
+  if (lead.status === "sent" || lead.status === "invalid_email") return
+
+  if (!isValidEmail(email)) {
+    return
+  }
+
+  if (!isEmailAllowedForCampaignQueue(email)) {
+    await supabase.from("leads").update({ status: "invalid_email" }).eq("id", leadId)
+    return
+  }
+
+  const { data: campaign, error: cErr } = await supabase
+    .from("campaigns")
+    .select("message_template")
+    .eq("id", campaignId)
+    .single()
+
+  if (cErr || !campaign) {
+    console.error("[campaign-schedule] ensureInitial campaign:", cErr)
+    return
+  }
+
+  const template =
+    (campaign.message_template ?? "").trim() ||
+    "Hey {{first_name}}, I wanted to reach out."
+  const messageBody = personalizeMessage(template, lead)
+  const sendAt = new Date().toISOString()
+
+  const { error: insErr } = await supabase.from("campaign_messages").insert({
+    campaign_id: campaignId,
+    lead_id: leadId,
+    step_number: 1,
+    channel: OUTBOUND_EMAIL_CHANNEL,
+    message_body: messageBody,
+    send_at: sendAt,
+    status: "pending",
+    next_send_at: null,
+    user_id: lead.user_id,
+  })
+
+  if (insErr) {
+    console.error("[campaign-schedule] ensureInitial insert:", leadId, insErr)
+  }
 }
 
 /**
@@ -176,6 +258,8 @@ export async function applyCampaignSendSchedule(
   supabase: SupabaseClient,
   campaignId: string
 ): Promise<{ messagesInserted: number; messagesScheduled: number }> {
+  await deleteOrphanedCampaignMessages(supabase, campaignId)
+
   const messagesInserted = await ensureCampaignMessagesForCampaign(supabase, campaignId)
 
   const baseMs = Date.now()

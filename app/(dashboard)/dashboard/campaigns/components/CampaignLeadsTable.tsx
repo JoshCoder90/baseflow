@@ -3,7 +3,6 @@
 import { useState } from "react"
 import Link from "next/link"
 import { AddLeadModal } from "@/app/leads/AddLeadModal"
-import { supabase } from "@/lib/supabase"
 import { SCRAPER_MAX_ROWS_PER_CAMPAIGN } from "@/lib/campaign-leads-insert"
 
 type Lead = {
@@ -32,9 +31,13 @@ export function CampaignLeadsTable({ campaignId, leads, loading, isGenerating, o
   const isAtLimit = leads.length >= SCRAPER_MAX_ROWS_PER_CAMPAIGN
 
   const handleDeleteLead = async (leadId: string) => {
-    const { error } = await supabase.from("leads").delete().eq("id", leadId)
-    if (error) {
-      console.error("Delete lead failed:", error)
+    const res = await fetch(
+      `/api/campaigns/${encodeURIComponent(campaignId)}/leads/${encodeURIComponent(leadId)}`,
+      { method: "DELETE" }
+    )
+    if (!res.ok) {
+      const json = (await res.json().catch(() => ({}))) as { error?: string }
+      console.error("Delete lead failed:", json.error ?? res.status)
       return
     }
     onLeadDeleted?.(leadId)

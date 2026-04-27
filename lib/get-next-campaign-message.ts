@@ -59,9 +59,10 @@ export async function getNextCampaignMessage(
 
   const candidate = candidates[0] as ClaimedCampaignMessageRow
 
+  const claimedAt = new Date().toISOString()
   const { data: claimed, error: claimErr } = await supabase
     .from("campaign_messages")
-    .update({ status: "sending" })
+    .update({ status: "sending", sending_claimed_at: claimedAt })
     .eq("id", candidate.id)
     .eq("status", "queued")
     .select(SELECT_FIELDS)
@@ -81,6 +82,7 @@ export async function revertCampaignMessageToQueued(
     .update({
       status: "queued",
       next_send_at: nextSendAt,
+      sending_claimed_at: null,
     })
     .eq("id", messageId)
     .eq("status", "sending")

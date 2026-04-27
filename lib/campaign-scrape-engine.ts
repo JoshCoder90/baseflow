@@ -6,6 +6,7 @@ import {
   contactKeyForCampaignLead,
   insertOneCampaignLeadIfUnderCap,
   type LeadRowInput,
+  MAX_LEADS_PER_CAMPAIGN,
 } from "@/lib/campaign-leads-insert"
 import {
   buildAllSearchAreaStrings,
@@ -21,6 +22,7 @@ import {
   scrapeEmailFromWebsite,
 } from "@/lib/email-enrichment"
 import { enrichEmail } from "@/lib/hunter-domain-enrich"
+import { ensureInitialCampaignMessageForLead } from "@/lib/campaign-schedule"
 import { CAMPAIGN_NEARBY_OFFSET_DEG } from "@/lib/campaign-geo-expansion"
 import {
   geocodeAddressToTarget,
@@ -30,14 +32,21 @@ import {
 } from "@/lib/location-targeting"
 import { parseSearchQuery } from "@/lib/parse-search-query"
 import { SCRAPE_POLICY } from "@/lib/rate-limit-policy"
+import {
+  consumeGoogleMapsApiSlot,
+  MAX_GOOGLE_MAPS_API_CALLS_PER_CAMPAIGN_SCRAPE,
+  safeGoogleCall,
+} from "@/lib/google-maps-api-budget"
 
 const MAX_LEADS = SCRAPE_POLICY.maxLeadsPerScrape
 const RADIUS_STEPS = [5000, 10000, 20000, 50000]
 /** Legacy Nearby Search returns a fixed payload shape; field masks are not supported on this endpoint. */
 const MAX_RADIUS_STEPS = 3
 const MAX_PLACE_PAGES_PER_SEARCH = 5
-const PAGE_TOKEN_DELAY_MS = 1500
-const BATCH_SIZE = 15
+/** Next-page token pacing for Places pagination (too low → INVALID_REQUEST spikes). */
+const PAGE_TOKEN_DELAY_MS = 950
+/** Places rows processed per inner slice (keep aligned with {@link SCRAPE_BATCH_INSERT_BUDGET}). */
+const BATCH_SIZE = 36
 const SMART_STOP_MAX_BUSINESSES_SCANNED = 4000
 const MAX_RAW_BUSINESSES = 2500
 const MAX_CONSECUTIVE_EMPTY_WAVES = 3
@@ -49,8 +58,14 @@ const ENRICH_LEAD_TIMEOUT_MS = 8000
 const TEXT_SEARCH_MAX_PAGES_PER_QUERY = 5
 const TEXT_SEARCH_BIAS_RADII_M = [35_000, 55_000, 85_000]
 
-/** Inserts per /api/scrape-batch invocation (10–20 range). */
-export const SCRAPE_BATCH_INSERT_BUDGET = 15
+/**
+ * Max **new lead inserts** per `/api/scrape-batch` HTTP request (not a Google billing unit).
+ * Larger = fewer round trips = faster; route `maxDuration` must allow enrichment + Places work.
+ */
+export const SCRAPE_BATCH_INSERT_BUDGET = 36
+
+/** Hunter.io domain lookups per full campaign scrape (checkpointed — spans all batches). */
+const MAX_HUNTER_DOMAIN_LOOKUPS_PER_CAMPAIGN_SCRAPE = 110
 
 export type CampaignScrapeCheckpoint = {
   v: 1
@@ -81,6 +96,14 @@ export type CampaignScrapeCheckpoint = {
   contactFetchOffset: number
   /** Cumulative Google Maps HTTP calls for this campaign scrape (checkpointed across batches). */
   apiCalls?: number
+  /** Hunter.io attempts used this campaign (checkpointed). */
+  hunterCallsUsed?: number
+  /** When true, skip further Places/Geocoding (budget hit); finalize scrape without text-search. */
+  apiBudgetExhausted?: boolean
+  /** Dedupe first-page Nearby/Text search keys across batches (not pagination tokens). */
+  seenSearchKeys?: string[]
+  /** How many geo-center offset expansions have run (cap runaway growth). */
+  radiusExpansionRuns?: number
 }
 
 type SearchPoint = { area: string; lat: number; lng: number }
@@ -198,7 +221,8 @@ async function runHunterFallbackChunk(
   supabase: SupabaseClient,
   genCtx: GenCtx,
   TARGET: number,
-  maxUpdatesThisCall: number
+  maxUpdatesThisCall: number,
+  checkpoint: CampaignScrapeCheckpoint
 ): Promise<number> {
   let emailsFound = await countEmailLeadsForContext(supabase, genCtx)
   if (!process.env.HUNTER_IO_API_KEY?.trim()) {
@@ -230,18 +254,27 @@ async function runHunterFallbackChunk(
     if (updates >= maxUpdatesThisCall) break
 
     const batch = leadsWithoutEmail.slice(i, i + BATCH_SIZE)
-    const enrichedResults = await Promise.all(
-      batch.map(async (lead) => {
-        try {
-          const domain = domainFromWebsiteUrl((lead.website as string) ?? null)
-          if (!domain) return { lead, enriched: null as string | null }
-          const enriched = await enrichEmail(domain)
-          return { lead, enriched }
-        } catch {
-          return { lead, enriched: null as string | null }
-        }
-      })
-    )
+    const enrichedResults: { lead: (typeof allLeads)[0]; enriched: string | null }[] = []
+    for (const lead of batch) {
+      const domain = domainFromWebsiteUrl((lead.website as string) ?? null)
+      if (!domain) {
+        enrichedResults.push({ lead, enriched: null })
+        continue
+      }
+      const used = checkpoint.hunterCallsUsed ?? 0
+      if (used >= MAX_HUNTER_DOMAIN_LOOKUPS_PER_CAMPAIGN_SCRAPE) {
+        enrichedResults.push({ lead, enriched: null })
+        continue
+      }
+      checkpoint.hunterCallsUsed = used + 1
+      let enriched: string | null = null
+      try {
+        enriched = await enrichEmail(domain)
+      } catch {
+        enriched = null
+      }
+      enrichedResults.push({ lead, enriched })
+    }
 
     for (const { lead, enriched } of enrichedResults) {
       if (updates >= maxUpdatesThisCall) break
@@ -256,6 +289,11 @@ async function runHunterFallbackChunk(
       if (!upErr) {
         emailsFound++
         updates++
+        await ensureInitialCampaignMessageForLead(
+          supabase,
+          genCtx.campaignId,
+          lead.id as string
+        )
       }
     }
   }
@@ -395,6 +433,8 @@ export async function prepareCampaignScrapeCheckpoint(params: {
     textPageNum: 0,
     postPhase: "none",
     contactFetchOffset: 0,
+    seenSearchKeys: [],
+    radiusExpansionRuns: 0,
   }
 }
 
@@ -406,6 +446,10 @@ async function fetchWebsiteAndEmailForPlace(
     knownWebsite?: string | null
     /** Invoked immediately before a Place Details HTTP request; return false to skip the request. */
     beforeDetailCall?: () => boolean
+    /** When true, skip Place Details HTTP (save cost after many list/geocode calls). */
+    skipPlaceDetails?: () => boolean
+    /** Async: reserve one Hunter lookup (serialized under parallel enrich workers). */
+    reserveHunterSlot?: () => Promise<boolean>
   }
 ): Promise<{
   website: string | null
@@ -419,6 +463,10 @@ async function fetchWebsiteAndEmailForPlace(
     let phone: string | null = null
 
     if (!website) {
+      if (opts?.skipPlaceDetails?.()) {
+        console.log("[LIMIT] Skipping details (cost control)")
+        return { website: null, email: null, guessedEmail: null, phone: null }
+      }
       if (opts?.beforeDetailCall && !opts.beforeDetailCall()) {
         return { website: null, email: null, guessedEmail: null, phone: null }
       }
@@ -446,9 +494,14 @@ async function fetchWebsiteAndEmailForPlace(
 
     const domain = domainFromWebsiteUrl(website)
     if (!email && domain) {
-      const hunter = await enrichEmail(domain)
-      if (hunter && isEmailAllowedForCampaignQueue(hunter)) {
-        email = hunter
+      const mayHunter = opts?.reserveHunterSlot
+        ? await opts.reserveHunterSlot()
+        : true
+      if (mayHunter) {
+        const hunter = await enrichEmail(domain)
+        if (hunter && isEmailAllowedForCampaignQueue(hunter)) {
+          email = hunter
+        }
       }
     }
     if (!email && domain) {
@@ -495,8 +548,10 @@ export async function runCampaignScrapeBatch(params: {
   apiKey: string
   insertBudget?: number
 }): Promise<ScrapeBatchResult> {
-  const MAX_API_CALLS = 250
-  let apiCalls = 0
+  const MAX_API_CALLS = MAX_GOOGLE_MAPS_API_CALLS_PER_CAMPAIGN_SCRAPE
+  /** Reserve trailing calls for list/search pagination; fewer skips → more emails (Places Details kept longer). */
+  const skipDetailsAfterCalls = MAX_API_CALLS - 14
+  const apiCallsRef = { current: 0 }
   const enrichQueue: PlaceResult[] = []
   let enrichProducersDone = false
   try {
@@ -508,7 +563,7 @@ export async function runCampaignScrapeBatch(params: {
   const { data: campaign, error: cErr } = await supabase
     .from("campaigns")
     .select(
-      "id, user_id, target_search_query, lead_generation_status, scrape_checkpoint, location_lat, location_lng"
+      "id, user_id, status, target_search_query, lead_generation_status, scrape_checkpoint, location_lat, location_lng"
     )
     .eq("id", campaignId)
     .eq("user_id", userId)
@@ -546,6 +601,25 @@ export async function runCampaignScrapeBatch(params: {
     return { ok: false, error: "Unauthorized", scrapedThisBatch: 0, totalLeadsNow: 0, emailLeadsNow: 0, done: true, leadCap: MAX_LEADS, phase: "error" }
   }
 
+  if ((campaign as { status?: string }).status === "completed") {
+    console.log("[STOP] Campaign already completed")
+    const totalLeadsNow = await getLeadCount(supabase, campaignId)
+    const emailLeadsNow = await countEmailLeadsForContext(supabase, {
+      mode: "campaign",
+      campaignId,
+    })
+    return {
+      ok: true,
+      skipped: true,
+      scrapedThisBatch: 0,
+      totalLeadsNow,
+      emailLeadsNow,
+      done: true,
+      leadCap: MAX_LEADS,
+      phase: "completed",
+    }
+  }
+
   const lg = campaign.lead_generation_status as string | null
   if (lg !== "generating") {
     const totalLeadsNow = await getLeadCount(supabase, campaignId)
@@ -581,14 +655,7 @@ export async function runCampaignScrapeBatch(params: {
   const checkpointFromDb = campaign.scrape_checkpoint as CampaignScrapeCheckpoint | null
   if (!checkpointFromDb || checkpointFromDb.v !== 1) {
     try {
-      const beforePrepGoogle = (): boolean => {
-        if (apiCalls >= MAX_API_CALLS) {
-          console.log("[HARD STOP] API limit reached:", apiCalls)
-          return false
-        }
-        apiCalls++
-        return true
-      }
+      const beforePrepGoogle = (): boolean => consumeGoogleMapsApiSlot(apiCallsRef, MAX_API_CALLS)
       const prepared = await prepareCampaignScrapeCheckpoint({
         supabase,
         ctx: {
@@ -602,7 +669,7 @@ export async function runCampaignScrapeBatch(params: {
         storedCampaignCoords,
         beforeGoogleMapsCall: beforePrepGoogle,
       })
-      prepared.apiCalls = apiCalls
+      prepared.apiCalls = apiCallsRef.current
       const { error: cpSaveErr } = await supabase
         .from("campaigns")
         .update({
@@ -659,7 +726,11 @@ export async function runCampaignScrapeBatch(params: {
       checkpoint.postPhase = "hunter_trim"
     }
   }
-  apiCalls = checkpoint.apiCalls ?? 0
+  apiCallsRef.current = checkpoint.apiCalls ?? 0
+  const seenQueries = new Set<string>(checkpoint.seenSearchKeys ?? [])
+  const persistSeenSearchKeys = () => {
+    checkpoint.seenSearchKeys = [...seenQueries].slice(-800)
+  }
   const ctx: CampaignCtx = {
     campaignId,
     userId,
@@ -671,19 +742,132 @@ export async function runCampaignScrapeBatch(params: {
   const genCtx: GenCtx = { mode: "campaign", campaignId }
   let emailLeadsInCampaign = await countEmailLeadsForContext(supabase, genCtx)
 
-  async function maybeSyncCampaignUI(totalLeads: number, emailCount: number): Promise<void> {
-    if (totalLeads % 5 !== 0) return
+  /** When DB lacks `leads_found`/`emails_found` (or PostgREST schema cache is stale), stop hammering Supabase every lead. */
+  let campaignCounterSyncDisabled = false
+  let counterSyncWarned = false
+
+  function counterColumnsLikelyMissing(message: string): boolean {
+    const m = message.toLowerCase()
+    return (
+      m.includes("schema cache") ||
+      m.includes("leads_found") ||
+      m.includes("emails_found") ||
+      m.includes("pgrst204") ||
+      m.includes("could not find")
+    )
+  }
+
+  let counterSyncDebounce: ReturnType<typeof setTimeout> | null = null
+  let pendingCounterPayload: { leads_found: number; emails_found: number } | null = null
+
+  async function updateCampaignLeadCounters(
+    payload: { leads_found: number; emails_found: number },
+    logPrefix: string
+  ): Promise<void> {
+    if (campaignCounterSyncDisabled) return
+
     const { error } = await supabase
       .from("campaigns")
-      .update({
-        leads_found: totalLeads,
-        emails_found: emailCount,
-      })
+      .update(payload)
+      .eq("id", campaignId)
+      .eq("user_id", userId)
+
+    if (!error) return
+
+    const msg = String(error.message ?? "")
+    if (msg.includes("emails_found") || msg.includes("leads_found")) {
+      const { error: fallbackErr } = await supabase
+        .from("campaigns")
+        .update({ leads_found: payload.leads_found })
+        .eq("id", campaignId)
+        .eq("user_id", userId)
+      if (!fallbackErr) return
+      const fb = String(fallbackErr.message ?? "")
+      if (counterColumnsLikelyMissing(msg) || counterColumnsLikelyMissing(fb)) {
+        campaignCounterSyncDisabled = true
+        if (!counterSyncWarned) {
+          counterSyncWarned = true
+          console.warn(
+            `${logPrefix} disabled — campaigns.leads_found / emails_found not available (run Supabase migrations or reload schema). Live lead counts still come from the leads table + Realtime.`
+          )
+        }
+        return
+      }
+      console.log(`${logPrefix} (fallback leads_found only):`, fb)
+      return
+    }
+
+    if (counterColumnsLikelyMissing(msg)) {
+      campaignCounterSyncDisabled = true
+      if (!counterSyncWarned) {
+        counterSyncWarned = true
+        console.warn(
+          `${logPrefix} disabled — ${msg}. Apply migrations or reload schema; skipping further counter writes this run.`
+        )
+      }
+      return
+    }
+
+    console.log(logPrefix, error.message)
+  }
+
+  function scheduleCampaignCounterSync(totalLeads: number, emailCount: number): void {
+    if (campaignCounterSyncDisabled) return
+    pendingCounterPayload = {
+      leads_found: totalLeads,
+      emails_found: emailCount,
+    }
+    if (counterSyncDebounce) return
+    counterSyncDebounce = setTimeout(() => {
+      counterSyncDebounce = null
+      const p = pendingCounterPayload
+      pendingCounterPayload = null
+      if (!p || campaignCounterSyncDisabled) return
+      void updateCampaignLeadCounters(p, "[scrape] campaigns leads_found/emails_found update:")
+    }, 450)
+  }
+
+  async function maybeSyncCampaignUI(totalLeads: number, emailCount: number): Promise<void> {
+    scheduleCampaignCounterSync(totalLeads, emailCount)
+  }
+
+  let hasMarkedEnriching = false
+  async function maybeSetEnrichingStatus(leadCount: number): Promise<void> {
+    if (hasMarkedEnriching) return
+    if (leadCount < leadCap) return
+    hasMarkedEnriching = true
+    const { error } = await supabase
+      .from("campaigns")
+      .update({ status: "enriching" })
       .eq("id", campaignId)
       .eq("user_id", userId)
     if (error) {
-      console.log("[scrape] campaigns leads_found/emails_found update:", error.message)
+      console.log("[scrape] status→enriching", error.message)
     }
+  }
+
+  {
+    const n0 = await getLeadCount(supabase, campaignId)
+    void maybeSetEnrichingStatus(n0)
+  }
+
+  async function scrapeCampaignStatusTerminal(): Promise<boolean> {
+    const { data } = await supabase
+      .from("campaigns")
+      .select("status")
+      .eq("id", campaignId)
+      .eq("user_id", userId)
+      .maybeSingle()
+    return (data?.status as string | undefined) === "completed"
+  }
+
+  async function maybeHardCapLeads(totalLeadsNow: number): Promise<void> {
+    if (totalLeadsNow < leadCap) return
+    console.log("[DONE] Lead cap reached")
+    await supabase.from("campaigns").update({ status: "completed" }).eq("id", campaignId).eq("user_id", userId)
+    checkpoint.stopCollecting = true
+    checkpoint.collectPhase = "collection_done"
+    enrichProducersDone = true
   }
 
   async function assertCampaignExists(): Promise<boolean> {
@@ -735,28 +919,78 @@ export async function runCampaignScrapeBatch(params: {
   let primaryTarget = checkpoint.primaryTarget
 
   function consumeGoogleApiCall(): boolean {
-    if (apiCalls >= MAX_API_CALLS) {
-      console.log("[HARD STOP] API limit reached:", apiCalls)
+    if (apiCallsRef.current >= MAX_API_CALLS) {
+      console.log("[STOP] API cap reached - finishing early")
+      checkpoint.apiBudgetExhausted = true
       checkpoint.stopCollecting = true
       return false
     }
-    apiCalls++
-    checkpoint.apiCalls = apiCalls
+    const ok = consumeGoogleMapsApiSlot(apiCallsRef, MAX_API_CALLS)
+    if (!ok) {
+      checkpoint.apiBudgetExhausted = true
+      checkpoint.stopCollecting = true
+      return false
+    }
+    checkpoint.apiCalls = apiCallsRef.current
     return true
   }
 
+  const safePlacesHttp = safeGoogleCall(apiCallsRef, MAX_API_CALLS, (u: string) => safeFetch(u))
+
   async function googlePlacesFetch(url: string): Promise<Response | null> {
-    if (!consumeGoogleApiCall()) return null
-    return safeFetch(url)
+    if (apiCallsRef.current >= MAX_API_CALLS) {
+      checkpoint.apiBudgetExhausted = true
+      checkpoint.stopCollecting = true
+      return null
+    }
+    const before = apiCallsRef.current
+    const res = await safePlacesHttp(url)
+    if (res === null && apiCallsRef.current === before) {
+      checkpoint.apiBudgetExhausted = true
+      checkpoint.stopCollecting = true
+    }
+    checkpoint.apiCalls = apiCallsRef.current
+    return res
+  }
+
+  /** Serialize Hunter budget checks — enrich worker runs parallel batches of 5. */
+  let hunterReservePending = Promise.resolve<boolean>(true)
+
+  async function reserveHunterSlot(): Promise<boolean> {
+    const run = hunterReservePending.then((): boolean => {
+      const u = checkpoint.hunterCallsUsed ?? 0
+      if (u >= MAX_HUNTER_DOMAIN_LOOKUPS_PER_CAMPAIGN_SCRAPE) return false
+      checkpoint.hunterCallsUsed = u + 1
+      return true
+    })
+    hunterReservePending = run.then(
+      () => true,
+      () => true
+    )
+    return run
   }
 
   async function runEnrichWorker() {
-    const w = 5
+    const w = 7
+    let enrichIterations = 0
     while (true) {
+      enrichIterations++
+      if (enrichIterations > 250_000) {
+        console.log("[STOP] enrich worker iteration cap")
+        break
+      }
+      if (enrichIterations % 120 === 0 && (await scrapeCampaignStatusTerminal())) {
+        console.log("[STOP] Campaign already completed")
+        break
+      }
       if (enrichQueue.length === 0) {
         if (enrichProducersDone) break
         await scraperDelay(20)
         continue
+      }
+      if (await scrapeCampaignStatusTerminal()) {
+        console.log("[STOP] Campaign already completed")
+        break
       }
       const batch = enrichQueue.splice(0, w)
       await Promise.all(
@@ -768,25 +1002,53 @@ export async function runCampaignScrapeBatch(params: {
             {
               knownWebsite: place.website,
               beforeDetailCall: consumeGoogleApiCall,
+              skipPlaceDetails: () => apiCallsRef.current > skipDetailsAfterCalls,
+              reserveHunterSlot,
             }
           )
-          if (!website?.trim() && !email?.trim() && !guessedEmail?.trim() && !phone?.trim()) return
-          const em = email && isEmailAllowedForCampaignQueue(email) ? email : null
+          let emailOut = email
+          const siteForHtml = (website?.trim() || place.website?.trim()) ?? ""
+          if (!emailOut?.trim() && siteForHtml) {
+            try {
+              const u = normalizeWebsiteUrl(siteForHtml)
+              const htmlRes = await fetch(u, { signal: AbortSignal.timeout(8000) })
+              if (htmlRes.ok) {
+                const pageHtml = await htmlRes.text()
+                const match = pageHtml.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
+                if (match?.[0] && isEmailAllowedForCampaignQueue(match[0])) {
+                  emailOut = match[0]
+                }
+              }
+            } catch {
+              /* cheap fallback — ignore */
+            }
+          }
+          if (!website?.trim() && !emailOut?.trim() && !guessedEmail?.trim() && !phone?.trim()) return
+          const em = emailOut && isEmailAllowedForCampaignQueue(emailOut) ? emailOut : null
           const updatePayload: Record<string, unknown> = {
             website: website || null,
             email: em,
             guessed_email: em && guessedEmail && guessedEmail === em ? guessedEmail : null,
           }
           if (phone) updatePayload.phone = phone
-          const { error } = await supabase
+          const { data: updatedLead, error } = await supabase
             .from("leads")
             .update(updatePayload)
             .eq("campaign_id", campaignId)
             .eq("place_id", place.place_id)
             .eq("user_id", userId)
+            .select("id")
+            .maybeSingle()
           if (error) {
             console.log("[enrich-worker] update", error.message)
             return
+          }
+          if (em && updatedLead?.id) {
+            await ensureInitialCampaignMessageForLead(
+              supabase,
+              campaignId,
+              updatedLead.id as string
+            )
           }
           if (em) {
             emailLeadsInCampaign++
@@ -835,7 +1097,7 @@ export async function runCampaignScrapeBatch(params: {
         company: place.name,
         address: place.vicinity || place.formatted_address || null,
         google_rating: place.rating ?? null,
-        status: "cold",
+        status: "pending",
         place_id: place.place_id,
         website: w,
         phone: null,
@@ -856,9 +1118,11 @@ export async function runCampaignScrapeBatch(params: {
         scrapedThisBatch++
         leadsCollected++
         void maybeSyncCampaignUI(leadsCollected, emailLeadsInCampaign)
+        void maybeSetEnrichingStatus(leadsCollected)
         enrichQueue.push(place)
         console.log(`Scraped ${scrapedThisBatch} leads`)
         console.log(`Total leads now: ${leadsCollected}`)
+        await maybeHardCapLeads(leadsCollected)
       }
     }
     return inserted
@@ -873,7 +1137,18 @@ export async function runCampaignScrapeBatch(params: {
     }
   ): Promise<void> {
     let batch = [...places]
+    let ingestIterations = 0
     while (batch.length > 0 && scrapedThisBatch < insertBudget) {
+      ingestIterations++
+      if (ingestIterations > 10_000) {
+        console.log("[STOP] ingest iterations cap")
+        return
+      }
+      if (await scrapeCampaignStatusTerminal()) {
+        console.log("[STOP] Campaign already completed")
+        checkpoint.stopCollecting = true
+        return
+      }
       if (!(await assertCampaignExists())) {
         checkpoint.stopCollecting = true
         return
@@ -896,7 +1171,7 @@ export async function runCampaignScrapeBatch(params: {
           company: place.name,
           address: place.vicinity || place.formatted_address || null,
           google_rating: place.rating ?? null,
-          status: "cold",
+          status: "pending",
           place_id: place.place_id,
           website: w,
           phone: null,
@@ -915,9 +1190,11 @@ export async function runCampaignScrapeBatch(params: {
           scrapedThisBatch++
           leadsCollected++
           void maybeSyncCampaignUI(leadsCollected, emailLeadsInCampaign)
+          void maybeSetEnrichingStatus(leadsCollected)
           enrichQueue.push(place)
           console.log(`Scraped ${scrapedThisBatch} leads`)
           console.log(`Total leads now: ${leadsCollected}`)
+          await maybeHardCapLeads(leadsCollected)
         }
       }
     }
@@ -962,6 +1239,11 @@ export async function runCampaignScrapeBatch(params: {
   /** ---------- Nearby waves ---------- */
   if (checkpoint.postPhase === "none" && checkpoint.collectPhase === "nearby_waves") {
     while (scrapedThisBatch < insertBudget && !checkpoint.stopCollecting) {
+      if (await scrapeCampaignStatusTerminal()) {
+        console.log("[STOP] Campaign already completed")
+        checkpoint.stopCollecting = true
+        break
+      }
       if (!(await assertCampaignExists())) {
         checkpoint.stopCollecting = true
         break
@@ -983,25 +1265,33 @@ export async function runCampaignScrapeBatch(params: {
       checkpoint.wave++
 
       let appendedGeoCenter = false
+      const MAX_RADIUS_EXPANSION_RUNS = 2
+      const radiusRuns = checkpoint.radiusExpansionRuns ?? 0
       if (
         !checkpoint.stopCollecting &&
         checkpoint.campaignGeoOffsetIdx < CAMPAIGN_NEARBY_OFFSET_DEG.length &&
         checkpoint.wave > 1
       ) {
-        const o = CAMPAIGN_NEARBY_OFFSET_DEG[checkpoint.campaignGeoOffsetIdx]
-        checkpoint.campaignGeoOffsetIdx++
-        const nlat = primaryTarget.lat + o.lat
-        const nlng = primaryTarget.lng + o.lng
-        const exists = checkpoint.searchPoints.some(
-          (p) => Math.abs(p.lat - nlat) < 1e-4 && Math.abs(p.lng - nlng) < 1e-4
-        )
-        if (!exists) {
-          checkpoint.searchPoints.push({
-            area: `${primaryTarget.label} (nearby +${o.lat}, ${o.lng})`,
-            lat: nlat,
-            lng: nlng,
-          })
-          appendedGeoCenter = true
+        if (radiusRuns >= MAX_RADIUS_EXPANSION_RUNS) {
+          console.log("[STOP] Radius expansion capped")
+          checkpoint.campaignGeoOffsetIdx = CAMPAIGN_NEARBY_OFFSET_DEG.length
+        } else {
+          checkpoint.radiusExpansionRuns = radiusRuns + 1
+          const o = CAMPAIGN_NEARBY_OFFSET_DEG[checkpoint.campaignGeoOffsetIdx]
+          checkpoint.campaignGeoOffsetIdx++
+          const nlat = primaryTarget.lat + o.lat
+          const nlng = primaryTarget.lng + o.lng
+          const exists = checkpoint.searchPoints.some(
+            (p) => Math.abs(p.lat - nlat) < 1e-4 && Math.abs(p.lng - nlng) < 1e-4
+          )
+          if (!exists) {
+            checkpoint.searchPoints.push({
+              area: `${primaryTarget.label} (nearby +${o.lat}, ${o.lng})`,
+              lat: nlat,
+              lng: nlng,
+            })
+            appendedGeoCenter = true
+          }
         }
       }
 
@@ -1037,6 +1327,11 @@ export async function runCampaignScrapeBatch(params: {
             const pageKey = `${checkpoint.pi}|${checkpoint.r}|${checkpoint.ki}`
 
             paginate: while (!checkpoint.stopCollecting && scrapedThisBatch < insertBudget) {
+              if (await scrapeCampaignStatusTerminal()) {
+                console.log("[STOP] Campaign already completed")
+                checkpoint.stopCollecting = true
+                break outer
+              }
               if (!(await assertCampaignExists())) {
                 checkpoint.stopCollecting = true
                 break outer
@@ -1061,11 +1356,25 @@ export async function runCampaignScrapeBatch(params: {
                 await scraperDelay(PAGE_TOKEN_DELAY_MS)
               }
 
+              if (!requestToken) {
+                const queryKey = `${keyword}-${point.lat}-${point.lng}-${radius}`
+                if (seenQueries.has(queryKey)) {
+                  console.log("[SKIP] Duplicate query:", queryKey)
+                  break paginate
+                }
+                seenQueries.add(queryKey)
+                persistSeenSearchKeys()
+              }
+
               const url = !requestToken
                 ? `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${point.lat},${point.lng}&radius=${radius}&keyword=${encodeURIComponent(keyword)}&key=${apiKey}`
                 : `https://maps.googleapis.com/maps/api/place/nearbysearch/json?pagetoken=${requestToken}&key=${apiKey}`
 
               const res = await googlePlacesFetch(url)
+              if (res === null && apiCallsRef.current >= MAX_API_CALLS) {
+                console.log("[STOP] API cap reached - finishing early")
+                break paginate
+              }
               const data = await safeJson<{
                 results?: PlaceResult[]
                 error_message?: string
@@ -1147,12 +1456,23 @@ export async function runCampaignScrapeBatch(params: {
 
       if (checkpoint.campaignPlaceBuffer.length > 0 && scrapedThisBatch < insertBudget) {
         globalDedupe = await reloadDedupe()
-        while (checkpoint.campaignPlaceBuffer.length > 0 && scrapedThisBatch < insertBudget) {
+        let bufferFlushLoops = 0
+        while (
+          checkpoint.campaignPlaceBuffer.length > 0 &&
+          scrapedThisBatch < insertBudget &&
+          bufferFlushLoops < 5000
+        ) {
+          bufferFlushLoops++
           await flushBufferChunk(checkpoint.campaignPlaceBuffer, globalDedupe)
+        }
+        if (bufferFlushLoops >= 5000) {
+          console.log("[STOP] buffer flush iteration cap")
+          checkpoint.stopCollecting = true
         }
       }
 
       leadsCollected = await getLeadCount(supabase, campaignId)
+      await maybeHardCapLeads(leadsCollected)
       const waveInserted = scrapedThisBatch - waveScrapedStart
 
       if (leadsCollected >= leadCap) {
@@ -1160,6 +1480,11 @@ export async function runCampaignScrapeBatch(params: {
         break
       }
 
+      if (checkpoint.apiBudgetExhausted) {
+        checkpoint.collectPhase = "collection_done"
+        checkpoint.stopCollecting = false
+        break
+      }
       if (tryStopCampaignScrape(leadsCollected, checkpoint.rawBusinessesSeen, checkpoint.stopCollecting)) {
         checkpoint.collectPhase = "text_search"
         checkpoint.textRi = 0
@@ -1199,9 +1524,14 @@ export async function runCampaignScrapeBatch(params: {
   /** ---------- Text search ---------- */
   globalDedupe = await reloadDedupe()
 
+  if (checkpoint.apiBudgetExhausted && checkpoint.collectPhase === "text_search") {
+    checkpoint.collectPhase = "collection_done"
+  }
+
   if (
     checkpoint.postPhase === "none" &&
     checkpoint.collectPhase === "text_search" &&
+    !checkpoint.apiBudgetExhausted &&
     scrapedThisBatch < insertBudget
   ) {
     await supabase
@@ -1227,6 +1557,11 @@ export async function runCampaignScrapeBatch(params: {
         const query = checkpoint.textQueries[checkpoint.textQueryIdx]
 
         while (scrapedThisBatch < insertBudget && !checkpoint.stopCollecting) {
+          if (await scrapeCampaignStatusTerminal()) {
+            console.log("[STOP] Campaign already completed")
+            checkpoint.stopCollecting = true
+            break textOuter
+          }
           if (!(await assertCampaignExists())) {
             checkpoint.stopCollecting = true
             break textOuter
@@ -1237,9 +1572,20 @@ export async function runCampaignScrapeBatch(params: {
             checkpoint.collectPhase = "collection_done"
             break textOuter
           }
+          await maybeHardCapLeads(leadsCollected)
+          if (checkpoint.stopCollecting) break textOuter
 
           let url: string
           if (!checkpoint.textPageToken) {
+            const queryKey = `${query}-${primaryTarget.lat}-${primaryTarget.lng}-${radiusBias}`
+            if (seenQueries.has(queryKey)) {
+              console.log("[SKIP] Duplicate query:", queryKey)
+              checkpoint.textPageToken = null
+              checkpoint.textPageNum = 0
+              break
+            }
+            seenQueries.add(queryKey)
+            persistSeenSearchKeys()
             url = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(
               query
             )}&location=${primaryTarget.lat},${primaryTarget.lng}&radius=${radiusBias}&key=${apiKey}`
@@ -1251,6 +1597,10 @@ export async function runCampaignScrapeBatch(params: {
           }
 
           const res = await googlePlacesFetch(url)
+          if (res === null && apiCallsRef.current >= MAX_API_CALLS) {
+            console.log("[STOP] API cap reached - finishing early")
+            break
+          }
           const data = await safeJson<{
             results?: PlaceResult[]
             next_page_token?: string
@@ -1275,6 +1625,8 @@ export async function runCampaignScrapeBatch(params: {
           leadsCollected = await getLeadCount(supabase, campaignId)
           if (leadsCollected >= leadCap) break textOuter
           if (scrapedThisBatch >= insertBudget) break textOuter
+          await maybeHardCapLeads(leadsCollected)
+          if (checkpoint.stopCollecting) break textOuter
         }
 
         checkpoint.textPageToken = null
@@ -1305,31 +1657,57 @@ export async function runCampaignScrapeBatch(params: {
 
   /** ---------- Hunter + trim + finalize ---------- */
   if (checkpoint.postPhase === "hunter_trim") {
-    emailLeadsNow = await runHunterFallbackChunk(supabase, genCtx, leadCap, BATCH_SIZE)
+    emailLeadsNow = await runHunterFallbackChunk(
+      supabase,
+      genCtx,
+      leadCap,
+      BATCH_SIZE,
+      checkpoint
+    )
 
     await trimLeadRowsToCap(supabase, campaignId, leadCap)
     totalLeadsNow = await getLeadCount(supabase, campaignId)
     emailLeadsNow = await countEmailLeadsForContext(supabase, genCtx)
 
     const scrapeComplete = totalLeadsNow >= leadCap
-    await supabase
+    const finalizePayload: Record<string, unknown> = {
+      lead_generation_status: scrapeComplete ? "complete" : "partial",
+      lead_generation_stage: "complete",
+      scrape_checkpoint: null,
+      status: "completed",
+      leads_found: totalLeadsNow,
+      emails_found: emailLeadsNow,
+    }
+    const { error: finalizeErr } = await supabase
       .from("campaigns")
-      .update({
-        lead_generation_status: scrapeComplete ? "complete" : "partial",
-        lead_generation_stage: "complete",
-        scrape_checkpoint: null,
-        status: "completed",
-        leads_found: totalLeadsNow,
-        emails_found: emailLeadsNow,
-      })
+      .update(finalizePayload)
       .eq("id", campaignId)
       .eq("user_id", userId)
+    if (finalizeErr && String(finalizeErr.message ?? "").includes("emails_found")) {
+      delete finalizePayload.emails_found
+      const { error: fallbackFinalizeErr } = await supabase
+        .from("campaigns")
+        .update(finalizePayload)
+        .eq("id", campaignId)
+        .eq("user_id", userId)
+      if (fallbackFinalizeErr) {
+        console.log("[scrape] finalize update fallback failed:", fallbackFinalizeErr.message)
+      }
+    } else if (finalizeErr) {
+      console.log("[scrape] finalize update failed:", finalizeErr.message)
+    }
 
     checkpoint.postPhase = "done"
 
     console.log(
       `[scrape-batch] complete | leads_saved=${totalLeadsNow} emails_found=${emailLeadsNow}`
     )
+    const { data: debugQueue } = await supabase
+      .from("campaign_messages")
+      .select("*")
+      .eq("campaign_id", campaignId)
+    console.log("FINAL QUEUE STATE:", debugQueue)
+    console.log("QUEUE AFTER SCRAPE:", debugQueue)
 
     return {
       ok: true,
@@ -1365,6 +1743,7 @@ export async function runCampaignScrapeBatch(params: {
   }
   } finally {
     enrichProducersDone = true
+    const apiCalls = apiCallsRef.current
     console.log("[TOTAL API CALLS]:", apiCalls)
   }
 }

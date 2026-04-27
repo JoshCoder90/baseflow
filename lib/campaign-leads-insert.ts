@@ -218,22 +218,55 @@ export async function insertOneCampaignLeadIfUnderCap(
   const payload = {
     ...row,
     campaign_id: campaignId,
-    status: (row.status as string) ?? "cold",
+    status: (row.status as string) ?? "pending",
   }
 
-  const { data, error } = await supabase.from("leads").insert(payload).select("id, place_id").single()
+  const { data: leadInsert, error } = await supabase
+    .from("leads")
+    .insert(payload)
+    .select("id, place_id, name, company, user_id")
+    .single()
 
   if (error) {
     console.log("insertOneCampaignLeadIfUnderCap insert error:", error.message)
     return null
   }
 
+  const newLead = leadInsert
+
   seenContactKeys.add(key)
   if (emRaw) seenContactKeys.add(`e:${emRaw.toLowerCase()}`)
 
-  const id = data?.id as string | undefined
-  const place_id = data?.place_id as string | undefined
+  const id = newLead?.id as string | undefined
+  const place_id = newLead?.place_id as string | undefined
   if (typeof id === "string" && typeof place_id === "string") {
+    console.log("CREATING QUEUE FOR LEAD:", newLead.id)
+    const { data: campaign } = await supabase
+      .from("campaigns")
+      .select("message_template")
+      .eq("id", campaignId)
+      .single()
+    const { data: _queueRows, error: queueError } = await supabase
+      .from("campaign_messages")
+      .insert({
+        campaign_id: campaignId,
+        lead_id: newLead.id,
+        step_number: 1,
+        status: "queued",
+        send_at: new Date().toISOString(),
+        user_id: (newLead?.user_id as string) ?? (row.user_id as string),
+        message_body: campaign?.message_template || "Hi, quick question...",
+      })
+      .select("id")
+
+    if (queueError) {
+      console.error("QUEUE INSERT FAILED:", queueError)
+    } else {
+      console.log("[QUEUE CREATED]", {
+        lead: newLead.id,
+        user: (newLead?.user_id as string) ?? (row.user_id as string),
+      })
+    }
     return { id, place_id }
   }
   return null

@@ -10,6 +10,9 @@ import {
   getMailboxEmailForUser,
   isMailboxAtDailySendCap,
 } from "@/lib/mailbox-daily-send-cap"
+import { getMsUntilCampaignSendGapElapsed } from "@/lib/campaign-send-gap"
+import { releaseStaleSendingClaims } from "@/lib/release-stale-sending-claims"
+import { OUTBOUND_EMAIL_CHANNEL } from "@/lib/outbound-channel"
 
 export type ProcessSendQueueResult = {
   success: true
@@ -66,6 +69,8 @@ export async function processCampaignSendQueueOnce(
 
   const ownerUserId = campaign.user_id as string
 
+  await releaseStaleSendingClaims(supabase)
+
   const mailbox = await getMailboxEmailForUser(supabase, ownerUserId)
   if (await isMailboxAtDailySendCap(supabase, mailbox)) {
     if (mailbox) {
@@ -80,12 +85,49 @@ export async function processCampaignSendQueueOnce(
     }
   }
 
+  const nowIsoPeek = new Date().toISOString()
+  const channelOr = `channel.eq.${OUTBOUND_EMAIL_CHANNEL},channel.is.null`
+  const { data: peekDue } = await supabase
+    .from("campaign_messages")
+    .select("next_send_at")
+    .eq("campaign_id", campaignId)
+    .eq("status", "queued")
+    .not("next_send_at", "is", null)
+    .lte("next_send_at", nowIsoPeek)
+    .is("sent_at", null)
+    .or(channelOr)
+    .order("next_send_at", { ascending: true })
+    .order("id", { ascending: true })
+    .limit(1)
+    .maybeSingle()
+
+  if (!peekDue?.next_send_at) {
+    return {
+      success: true,
+      processed: 0,
+      campaignStatus: campaign.status,
+    }
+  }
+
+  const gapMs = await getMsUntilCampaignSendGapElapsed(supabase, campaignId, {
+    messageNextSendAt: peekDue?.next_send_at as string | null | undefined,
+  })
+  if (gapMs > 0) {
+    return {
+      success: true,
+      processed: 0,
+      campaignStatus: campaign.status,
+      skipped: true,
+      reason: "send_gap",
+    }
+  }
+
   await supabase.rpc("set_config", {
     setting: "timezone",
     value: "UTC",
   })
 
-  const nowIso = new Date().toISOString()
+  const nowIso = nowIsoPeek
   const message = await getNextCampaignMessage(supabase, campaignId, nowIso)
 
   if (!message) {

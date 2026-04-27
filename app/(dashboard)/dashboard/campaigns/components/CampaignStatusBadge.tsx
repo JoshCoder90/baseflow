@@ -1,6 +1,8 @@
 type Status =
   | "draft"
   | "running"
+  | "scraping"
+  | "enriching"
   | "active"
   | "paused"
   | "stopped"
@@ -10,6 +12,8 @@ type Status =
 const STATUS_STYLES: Record<Status, string> = {
   draft: "bg-zinc-700/60 text-zinc-300 border-zinc-600/50",
   running: "bg-sky-500/15 text-sky-300 border-sky-500/30",
+  scraping: "bg-sky-500/15 text-sky-300 border-sky-500/30",
+  enriching: "bg-amber-500/15 text-amber-300 border-amber-500/30",
   active: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
   sending: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
   completed: "bg-zinc-600/60 text-zinc-300 border-zinc-500/50",

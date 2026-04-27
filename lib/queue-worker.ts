@@ -7,19 +7,30 @@ import { processSendQueue } from "@/lib/process-send-queue"
 
 const globalForWorker = globalThis as typeof globalThis & {
   __bfQueueWorkerStarted?: boolean
+  __bfQueueWorkerInterval?: ReturnType<typeof setInterval>
+  __bfQueueWorkerTimeout?: ReturnType<typeof setTimeout>
 }
 
 function shouldStartQueueWorker(): boolean {
   if (process.env.NEXT_RUNTIME === "edge") return false
   if (process.env.DISABLE_SERVER_QUEUE_POLLER === "1") return false
-  if (process.env.NODE_ENV === "development") return true
-  if (process.env.ENABLE_SERVER_QUEUE_POLLER === "1") return true
-  if (process.env.VERCEL !== "1") return true
-  return false
+  // Manual trigger only unless explicitly enabled.
+  return process.env.ENABLE_SERVER_QUEUE_POLLER === "1"
 }
 
 export function startQueueWorker() {
-  if (!shouldStartQueueWorker()) return
+  if (!shouldStartQueueWorker()) {
+    if (globalForWorker.__bfQueueWorkerInterval) {
+      clearInterval(globalForWorker.__bfQueueWorkerInterval)
+      globalForWorker.__bfQueueWorkerInterval = undefined
+    }
+    if (globalForWorker.__bfQueueWorkerTimeout) {
+      clearTimeout(globalForWorker.__bfQueueWorkerTimeout)
+      globalForWorker.__bfQueueWorkerTimeout = undefined
+    }
+    globalForWorker.__bfQueueWorkerStarted = false
+    return
+  }
   if (globalForWorker.__bfQueueWorkerStarted) return
   globalForWorker.__bfQueueWorkerStarted = true
 
@@ -42,6 +53,6 @@ export function startQueueWorker() {
     }
   }
 
-  setInterval(tick, intervalMs)
-  setTimeout(tick, 1500)
+  globalForWorker.__bfQueueWorkerInterval = setInterval(tick, intervalMs)
+  globalForWorker.__bfQueueWorkerTimeout = setTimeout(tick, 1500)
 }

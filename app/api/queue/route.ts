@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createClient } from "@supabase/supabase-js"
 import { createClient as createServerClient } from "@/lib/supabase/server"
-import { processQueue } from "@/lib/process-queue-batch"
 import { validateQueryUuid } from "@/lib/api-input-validation"
 import { heavyRouteIpLimitResponse } from "@/lib/ip-rate-limit"
 import { rateLimitResponse } from "@/lib/rateLimit"
@@ -46,13 +45,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Campaign not found" }, { status: 404 })
   }
 
-  if (campaign?.status === "active" || campaign?.status === "sending") {
-    try {
-      await processQueue()
-    } catch (e) {
-      console.error("Queue process error:", e)
-    }
-  }
+  console.log("Manual trigger only - no auto run")
 
   const { data: statusRow } = await supabase
     .from("campaigns")

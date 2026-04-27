@@ -46,11 +46,8 @@ export function CampaignsPageClient({ initialCampaigns }: Props) {
   }, [])
 
   useEffect(() => {
+    console.log("Campaign loaded once — no polling")
     void refetchCampaigns()
-    const interval = setInterval(() => {
-      void refetchCampaigns()
-    }, 5000)
-    return () => clearInterval(interval)
   }, [refetchCampaigns])
 
   async function handleDeleteCampaign(campaignId: string) {

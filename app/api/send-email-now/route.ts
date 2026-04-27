@@ -11,8 +11,10 @@ import {
 } from "@/lib/mailbox-daily-send-cap"
 import { validateUuid } from "@/lib/api-input-validation"
 import { dailyUsageLimitResponseIfExceeded } from "@/lib/daily-usage-limit"
-import { heavyRouteIpLimitResponse } from "@/lib/ip-rate-limit"
+import { queueSendRouteIpLimitResponse } from "@/lib/ip-rate-limit"
 import { rateLimitResponse } from "@/lib/rateLimit"
+import { getMsUntilCampaignSendGapElapsed } from "@/lib/campaign-send-gap"
+import { releaseStaleSendingClaims } from "@/lib/release-stale-sending-claims"
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ""
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY || ""
@@ -25,7 +27,7 @@ const SELECT_FIELDS =
  * Claims `queued` → `sending` (same as worker); worker skips non-queued rows.
  */
 export async function POST(req: Request) {
-  const _ip = heavyRouteIpLimitResponse(req, "send-email-now")
+  const _ip = queueSendRouteIpLimitResponse(req)
   if (_ip) return _ip
 
   const _rl = rateLimitResponse(req)
@@ -55,6 +57,8 @@ export async function POST(req: Request) {
   }
 
   const supabase = createClient(supabaseUrl, supabaseServiceKey)
+
+  await releaseStaleSendingClaims(supabase)
 
   const _dailyLimit = await dailyUsageLimitResponseIfExceeded(supabase, user.id)
   if (_dailyLimit) return _dailyLimit
@@ -95,6 +99,32 @@ export async function POST(req: Request) {
     )
   }
 
+  const gapMs = await getMsUntilCampaignSendGapElapsed(supabase, campaignId, {
+    messageNextSendAt: msg.next_send_at as string | null,
+  })
+  if (gapMs > 0) {
+    return NextResponse.json({
+      ok: true,
+      skipped: true,
+      reason: "send_gap",
+      retryAfterMs: gapMs,
+    })
+  }
+
+  const { count: siblingSending } = await supabase
+    .from("campaign_messages")
+    .select("id", { count: "exact", head: true })
+    .eq("campaign_id", campaignId)
+    .eq("status", "sending")
+
+  if ((siblingSending ?? 0) > 0) {
+    return NextResponse.json({
+      ok: true,
+      skipped: true,
+      reason: "send_in_progress",
+    })
+  }
+
   const mailbox = await getMailboxEmailForUser(supabase, user.id)
   if (await isMailboxAtDailySendCap(supabase, mailbox)) {
     if (mailbox) {
@@ -107,9 +137,10 @@ export async function POST(req: Request) {
     })
   }
 
+  const claimedAt = new Date().toISOString()
   const { data: claimed, error: claimErr } = await supabase
     .from("campaign_messages")
-    .update({ status: "sending" })
+    .update({ status: "sending", sending_claimed_at: claimedAt })
     .eq("id", messageId)
     .eq("status", "queued")
     .select(SELECT_FIELDS)

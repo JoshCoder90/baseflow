@@ -8,10 +8,12 @@ import type { ClaimedCampaignMessageRow } from "@/lib/get-next-campaign-message"
 import { revertCampaignMessageToQueued } from "@/lib/get-next-campaign-message"
 import { bumpConversationLastMessage } from "@/lib/bump-conversation-last-message"
 import {
-  DAILY_MAILBOX_SEND_CAP,
   countMailboxSendsRolling24h,
+  getEffectiveMailboxRollingSendCap,
   getMailboxEmailForUser,
 } from "@/lib/mailbox-daily-send-cap"
+import { sendOutboundEmailViaGmailServiceRole } from "@/lib/send-email-via-gmail"
+import { persistCampaignMessageSentRow } from "@/lib/persist-campaign-message-sent"
 
 export type ExecuteCampaignMessageSendResult = {
   processed: number
@@ -28,14 +30,6 @@ function htmlToPlainText(html: string): string {
     .trim()
 }
 
-function appOriginForInternalFetch(): string {
-  const base =
-    process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "") ||
-    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "") ||
-    "http://localhost:3000"
-  return base
-}
-
 export async function executeClaimedCampaignMessageSend(
   supabase: SupabaseClient,
   params: {
@@ -47,11 +41,12 @@ export async function executeClaimedCampaignMessageSend(
 ): Promise<ExecuteCampaignMessageSendResult> {
   const { campaignId, ownerUserId, subject, claimed } = params
 
+  const cap = getEffectiveMailboxRollingSendCap()
   const senderMailbox = await getMailboxEmailForUser(supabase, ownerUserId)
-  if (senderMailbox) {
+  if (cap !== null && senderMailbox) {
     const sentLast24h = await countMailboxSendsRolling24h(supabase, senderMailbox)
-    if (sentLast24h >= DAILY_MAILBOX_SEND_CAP) {
-      console.log("Daily cap hit for mailbox:", senderMailbox)
+    if (sentLast24h >= cap) {
+      console.log("Mailbox rolling cap hit (env MAILBOX_ROLLING_SEND_CAP / DISABLE):", senderMailbox)
       await revertCampaignMessageToQueued(
         supabase,
         claimed.id,
@@ -129,28 +124,16 @@ export async function executeClaimedCampaignMessageSend(
           ? raw
           : `<p>${raw.replace(/\n/g, "<br />")}</p>`
 
-    const sendUrl = `${appOriginForInternalFetch()}/api/send-email`
-    const res = await fetch(sendUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        to: lead.email,
-        subject: subject || "No subject",
-        html,
-        userId: ownerUserId,
-      }),
+    const sendResult = await sendOutboundEmailViaGmailServiceRole(supabase, {
+      ownerUserId,
+      toEmail: lead.email,
+      subject: subject || "No subject",
+      html,
     })
 
-    if (res.status === 400) {
-      let body: { error?: string } = {}
-      try {
-        body = (await res.json()) as { error?: string }
-      } catch {
-        /* ignore */
-      }
-      if (body.error === "GMAIL_RECONNECT_REQUIRED") {
+    if (!sendResult.ok && sendResult.status === 400) {
+      const err = sendResult.error
+      if (err === "GMAIL_RECONNECT_REQUIRED") {
         await supabase
           .from("campaign_messages")
           .update({
@@ -158,8 +141,8 @@ export async function executeClaimedCampaignMessageSend(
             error_message: "GMAIL_RECONNECT_REQUIRED",
           })
           .eq("id", claimed.id)
-      } else if (body.error === "Invalid domain" || body.error === "Filtered invalid email") {
-        const filtered = body.error === "Filtered invalid email"
+      } else if (err === "Invalid domain" || err === "Filtered invalid email") {
+        const filtered = err === "Filtered invalid email"
         await supabase
           .from("campaign_messages")
           .update({
@@ -178,14 +161,8 @@ export async function executeClaimedCampaignMessageSend(
           claimed.next_send_at
         )
       }
-    } else if (res.status === 200) {
-      let threadId: string | undefined
-      try {
-        const sendBody = (await res.json()) as { threadId?: string }
-        threadId = sendBody.threadId
-      } catch {
-        /* ignore */
-      }
+    } else if (sendResult.ok) {
+      const threadId = sendResult.threadId
 
       const sentAt = new Date().toISOString()
       const conversationContent =
@@ -214,30 +191,31 @@ export async function executeClaimedCampaignMessageSend(
       const resolvedSender =
         senderMailbox ?? (await getMailboxEmailForUser(supabase, ownerUserId))
 
-      const { error: msgErr } = await supabase
-        .from("campaign_messages")
-        .update({
-          status: "sent",
-          sent_at: sentAt,
-          next_send_at: null,
-          ...(resolvedSender ? { sender_email: resolvedSender } : {}),
-        })
-        .eq("id", claimed.id)
-        .eq("status", "sending")
+      const rowMarkedSent = await persistCampaignMessageSentRow(supabase, {
+        messageId: claimed.id,
+        sentAt,
+        senderMailbox: resolvedSender,
+      })
 
-      if (msgErr) {
-        console.error("Failed to mark campaign_message sent:", msgErr)
+      if (!rowMarkedSent) {
+        console.error(
+          "[execute-campaign-message-send] Email delivered but DB did not record sent — UI will stay out of sync until fixed"
+        )
       }
 
-      const { error: sentUpdateErr } = await supabase
-        .from("leads")
-        .update({
-          status: "sent",
-          next_send_at: null,
-        })
-        .eq("id", lead.id)
+      let sentUpdateErr: Error | null = null
+      if (rowMarkedSent) {
+        const { error } = await supabase
+          .from("leads")
+          .update({
+            status: "sent",
+            next_send_at: null,
+          })
+          .eq("id", lead.id)
+        sentUpdateErr = error
+      }
 
-      if (!sentUpdateErr) {
+      if (rowMarkedSent && !sentUpdateErr) {
         const { count: unsentMsgs } = await supabase
           .from("campaign_messages")
           .select("id", { count: "exact", head: true })
@@ -251,7 +229,7 @@ export async function executeClaimedCampaignMessageSend(
             .eq("id", campaignId)
           console.log(`Campaign completed: ${campaignId}`)
         }
-      } else {
+      } else if (sentUpdateErr) {
         console.error("Failed to mark lead sent:", sentUpdateErr)
       }
     } else {

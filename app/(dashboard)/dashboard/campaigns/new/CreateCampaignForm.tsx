@@ -108,7 +108,7 @@ export function CreateCampaignForm({ examplePrompts }: Props) {
         return
       }
 
-      router.push(`/dashboard/campaigns/${json.campaign.id}`)
+      router.push(`/dashboard/campaigns/${json.campaign.id}?startScrape=1`)
       router.refresh()
     } catch (err) {
       console.error("Create campaign error:", err)

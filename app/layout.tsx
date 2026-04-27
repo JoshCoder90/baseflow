@@ -1,16 +1,8 @@
-import { startGmailSyncLoop } from "@/lib/gmail-sync-loop";
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { SessionProvider } from "@/app/providers/SessionProvider";
 import { GmailReconnectProvider } from "@/app/providers/GmailReconnectProvider";
 import "./globals.css";
-
-let started = false;
-if (!started) {
-  started = true;
-  console.log("🚀 AUTO STARTING GMAIL SYNC LOOP...");
-  startGmailSyncLoop();
-}
 
 const geistSans = Geist({
   variable: "--font-geist-sans",

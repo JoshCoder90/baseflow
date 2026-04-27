@@ -166,10 +166,16 @@ async function loadCampaignForDetailPage(
 
 export default async function CampaignDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>
+  searchParams?: Promise<Record<string, string | string[] | undefined>>
 }) {
   const { id } = await params
+  const sp = searchParams ? await searchParams : {}
+  const raw = sp.startScrape
+  const startScrapeFlag = Array.isArray(raw) ? raw[0] : raw
+  const autoStartScrape = startScrapeFlag === "1" || startScrapeFlag === "true"
   const supabase = await createClient()
   const {
     data: { user },
@@ -208,16 +214,22 @@ export default async function CampaignDetailPage({
             {(campaign.status ?? "").toLowerCase() === "running" && (
               <CampaignStatusBadge status="running" />
             )}
+            {(campaign.status ?? "").toLowerCase() === "scraping" && (
+              <CampaignStatusBadge status="scraping" />
+            )}
+            {(campaign.status ?? "").toLowerCase() === "enriching" && (
+              <CampaignStatusBadge status="enriching" />
+            )}
             {(campaign.status ?? "").toLowerCase() === "completed" && (
               <CampaignStatusBadge status="completed" />
             )}
-            {!["running", "completed"].includes((campaign.status ?? "").toLowerCase()) && (
-              <CampaignStatusBadge status={campaign.status ?? "draft"} />
-            )}
+            {!["running", "scraping", "enriching", "completed"].includes(
+              (campaign.status ?? "").toLowerCase()
+            ) && <CampaignStatusBadge status={campaign.status ?? "draft"} />}
           </div>
         </header>
 
-        <CampaignDetailContent campaign={campaign} />
+        <CampaignDetailContent campaign={campaign} autoStartScrape={autoStartScrape} />
       </div>
     </div>
   )

@@ -9,10 +9,12 @@ import { executeClaimedCampaignMessageSend } from "@/lib/execute-campaign-messag
 import type { ClaimedCampaignMessageRow } from "@/lib/get-next-campaign-message"
 import { revertCampaignMessageToQueued } from "@/lib/get-next-campaign-message"
 import {
-  DAILY_MAILBOX_SEND_CAP,
   countMailboxSendsRolling24h,
+  getEffectiveMailboxRollingSendCap,
   getMailboxEmailForUser,
 } from "@/lib/mailbox-daily-send-cap"
+import { releaseStaleSendingClaims } from "@/lib/release-stale-sending-claims"
+import { getMsUntilCampaignSendGapElapsed } from "@/lib/campaign-send-gap"
 
 const SELECT_FIELDS =
   "id, campaign_id, lead_id, step_number, message_body, status, next_send_at, sent_at" as const
@@ -43,8 +45,11 @@ export type GlobalTickResult = {
 export async function processGlobalSingleQueuedSend(
   supabase: SupabaseClient
 ): Promise<GlobalTickResult> {
+  await releaseStaleSendingClaims(supabase)
+
   const nowIso = new Date().toISOString()
   const channelOr = `channel.eq.${OUTBOUND_EMAIL_CHANNEL},channel.is.null`
+  const mailboxCap = getEffectiveMailboxRollingSendCap()
 
   const { data: activeCampaigns, error: actErr } = await supabase
     .from("campaigns")
@@ -156,11 +161,21 @@ export async function processGlobalSingleQueuedSend(
       sendCountByMailbox.set(mailbox, sentInWindow)
     }
 
-    if (sentInWindow >= DAILY_MAILBOX_SEND_CAP) {
+    if (mailboxCap !== null && sentInWindow >= mailboxCap) {
       if (!capLoggedForMailbox.has(mailbox)) {
         capLoggedForMailbox.add(mailbox)
-        console.log("Daily cap hit for mailbox:", mailbox)
+        console.log(
+          "Mailbox rolling send cap hit (set MAILBOX_ROLLING_SEND_CAP or DISABLE_MAILBOX_SEND_CAP):",
+          mailbox
+        )
       }
+      continue
+    }
+
+    const gapMs = await getMsUntilCampaignSendGapElapsed(supabase, row.campaign_id, {
+      messageNextSendAt: row.next_send_at ?? null,
+    })
+    if (gapMs > 0) {
       continue
     }
 
@@ -179,7 +194,7 @@ export async function processGlobalSingleQueuedSend(
 
   const { data: claimed, error: claimErr } = await supabase
     .from("campaign_messages")
-    .update({ status: "sending" })
+    .update({ status: "sending", sending_claimed_at: nowIso })
     .eq("id", candidate.id)
     .eq("status", "queued")
     .select(SELECT_FIELDS)

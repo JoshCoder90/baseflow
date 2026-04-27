@@ -10,6 +10,9 @@ import { heavyRouteIpLimitResponse } from "@/lib/ip-rate-limit"
 import { runCampaignScrapeBatch } from "@/lib/campaign-scrape-engine"
 import { MAX_LEADS_PER_CAMPAIGN } from "@/lib/campaign-leads-insert"
 
+/** Serverless scrape can exceed defaults (one batch logged ~53s before tuning). Tune for your host plan. */
+export const maxDuration = 90
+
 export async function POST(req: Request) {
   try {
     console.log("[scrape-batch] start")
@@ -110,15 +113,18 @@ export async function POST(req: Request) {
       const campaignStatus = (campaign as { status?: string | null }).status
       console.log("[scrape] campaign.status:", campaignStatus)
 
-      console.log("[scrape] STEP 2.1b - optional campaigns.status → running")
+      console.log("[scrape] STEP 2.1b - optional campaigns.status → scraping")
       const preserveWhileScraping = new Set(["active", "sending", "paused", "stopped"])
+      const cs = (campaignStatus ?? "").toLowerCase()
       if (
-        campaignStatus !== "running" &&
-        !preserveWhileScraping.has((campaignStatus ?? "").toLowerCase())
+        cs !== "running" &&
+        cs !== "scraping" &&
+        cs !== "enriching" &&
+        !preserveWhileScraping.has(cs)
       ) {
         const { error: runUpdErr } = await supabase
           .from("campaigns")
-          .update({ status: "running" })
+          .update({ status: "scraping" })
           .eq("id", campaignId)
           .eq("user_id", user.id)
 

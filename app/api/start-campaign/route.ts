@@ -175,6 +175,7 @@ export async function POST(req: NextRequest) {
               message_body: messageBody,
               send_at: sendAtResume,
               status: "pending",
+              user_id: user.id,
             })
             if (!insertErr) insertedCount++
           }
@@ -227,6 +228,7 @@ export async function POST(req: NextRequest) {
               message_body: messageBody,
               send_at: sendAt,
               status: "pending",
+              user_id: user.id,
             })
             if (!insertErr) backfillCount++
           }

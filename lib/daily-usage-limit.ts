@@ -13,7 +13,7 @@ function utcDayStartIso(): string {
 /**
  * Counts usage today (UTC): leads created for this user + campaign_messages marked sent
  * for campaigns owned by this user (chunks campaign ids for `.in()` limits).
- * Returns null if any required query failed (caller should treat as over limit).
+ * Returns null if any required query failed (limit checks should fail open — do not treat as “at cap”).
  */
 export async function countUserDailyUsage(
   supabase: SupabaseClient,
@@ -64,13 +64,17 @@ export async function countUserDailyUsage(
   return (leadCount ?? 0) + sentTotal
 }
 
-/** 429 JSON if at or over the daily cap, or counts could not be verified. */
+/** 429 JSON only when usage is known to be at or over the daily cap (count failures do not block). */
 export async function dailyUsageLimitResponseIfExceeded(
   supabase: SupabaseClient,
   userId: string
 ): Promise<NextResponse | null> {
   const n = await countUserDailyUsage(supabase, userId)
-  if (n === null || n >= DAILY_USAGE_HARD_LIMIT) {
+  if (n === null) {
+    console.warn("[daily-usage-limit] count unavailable, not blocking request")
+    return null
+  }
+  if (n >= DAILY_USAGE_HARD_LIMIT) {
     return NextResponse.json(
       { error: "Daily usage limit reached" },
       { status: 429 }

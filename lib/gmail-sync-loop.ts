@@ -5,17 +5,15 @@
 
 const globalForGmail = globalThis as typeof globalThis & {
   __bfGmailSyncLoopStarted?: boolean
+  __bfGmailSyncInterval?: ReturnType<typeof setInterval>
+  __bfGmailSyncTimeout?: ReturnType<typeof setTimeout>
 }
-
-let isSyncRunning = false
 
 function shouldStartGmailAutoSync(): boolean {
   if (process.env.NEXT_RUNTIME === "edge") return false
   if (process.env.DISABLE_GMAIL_AUTO_SYNC === "1") return false
-  if (process.env.NODE_ENV === "development") return true
-  if (process.env.ENABLE_GMAIL_AUTO_SYNC === "1") return true
-  if (process.env.VERCEL !== "1") return true
-  return false
+  // Manual trigger only unless explicitly enabled.
+  return process.env.ENABLE_GMAIL_AUTO_SYNC === "1"
 }
 
 function syncEndpointUrl(): string {
@@ -28,12 +26,20 @@ function syncEndpointUrl(): string {
 }
 
 export function startGmailSyncLoop() {
-  if (!shouldStartGmailAutoSync()) return
-  if (globalForGmail.__bfGmailSyncLoopStarted || isSyncRunning) return
+  if (!shouldStartGmailAutoSync()) {
+    if (globalForGmail.__bfGmailSyncInterval) {
+      clearInterval(globalForGmail.__bfGmailSyncInterval)
+      globalForGmail.__bfGmailSyncInterval = undefined
+    }
+    if (globalForGmail.__bfGmailSyncTimeout) {
+      clearTimeout(globalForGmail.__bfGmailSyncTimeout)
+      globalForGmail.__bfGmailSyncTimeout = undefined
+    }
+    globalForGmail.__bfGmailSyncLoopStarted = false
+    return
+  }
+  if (globalForGmail.__bfGmailSyncLoopStarted) return
   globalForGmail.__bfGmailSyncLoopStarted = true
-  isSyncRunning = true
-
-  console.log("Gmail auto-sync started")
 
   const url = syncEndpointUrl()
 
@@ -43,18 +49,25 @@ export function startGmailSyncLoop() {
       ? { "x-baseflow-gmail-sync-internal": internalSecret }
       : undefined
 
+  let isGmailTickInFlight = false
   const tick = async () => {
+    if (isGmailTickInFlight) {
+      console.log("[SYNC BLOCKED] Already running")
+      return
+    }
+    isGmailTickInFlight = true
     try {
-      console.log("Auto syncing Gmail...")
       await fetch(url, {
         method: "POST",
         headers: internalHeaders,
       })
     } catch (err) {
       console.error("Gmail auto-sync error:", err)
+    } finally {
+      isGmailTickInFlight = false
     }
   }
 
-  setInterval(tick, 15_000)
-  setTimeout(tick, 2_000)
+  globalForGmail.__bfGmailSyncInterval = setInterval(tick, 60_000)
+  globalForGmail.__bfGmailSyncTimeout = setTimeout(tick, 3_000)
 }
