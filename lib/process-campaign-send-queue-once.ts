@@ -72,7 +72,7 @@ export async function processCampaignSendQueueOnce(
   await releaseStaleSendingClaims(supabase)
 
   const mailbox = await getMailboxEmailForUser(supabase, ownerUserId)
-  if (await isMailboxAtDailySendCap(supabase, mailbox)) {
+  if (await isMailboxAtDailySendCap(supabase, mailbox, ownerUserId)) {
     if (mailbox) {
       console.log("Daily cap hit for mailbox:", mailbox)
     }

@@ -124,7 +124,7 @@ async function sendViaGmail(
   toEmail: string,
   subject: string,
   body: string
-): Promise<{ threadId?: string }> {
+): Promise<{ threadId?: string; gmailMessageId?: string }> {
   const message = [
     `From: ${fromEmail}`,
     `To: ${toEmail}`,
@@ -155,8 +155,14 @@ async function sendViaGmail(
     throw new Error(`Gmail API error: ${res.status} ${err}`)
   }
 
-  const gmailResponse = (await res.json()) as { threadId?: string }
-  return { threadId: gmailResponse.threadId }
+  const gmailResponse = (await res.json()) as {
+    threadId?: string
+    id?: string
+  }
+  return {
+    threadId: gmailResponse.threadId,
+    gmailMessageId: gmailResponse.id,
+  }
 }
 
 async function processQueue_TEST(): Promise<number> {
@@ -377,7 +383,7 @@ async function processQueue_TEST(): Promise<number> {
 
     try {
       console.log("Sending static email (no personalization)")
-      const { threadId } = await sendViaGmail(
+      const { threadId, gmailMessageId } = await sendViaGmail(
         accessToken,
         userEmail,
         lead.email,
@@ -398,6 +404,7 @@ async function processQueue_TEST(): Promise<number> {
         content: conversationContent,
         created_at: sentAt,
         thread_id: threadId ?? null,
+        gmail_message_id: gmailMessageId ?? null,
       })
       if (insMsgErr) {
         console.error("[process-queue-batch] messages insert:", insMsgErr)
@@ -600,7 +607,7 @@ async function processQueue_REAL(): Promise<number> {
         const htmlBody = text.includes("<") ? text : `<p>${text.replace(/\n/g, "<br />")}</p>`
 
         console.log("Sending static email (no personalization)")
-        const { threadId } = await sendViaGmail(
+        const { threadId, gmailMessageId } = await sendViaGmail(
           accessToken,
           gmailConn.gmail_email,
           lead.email,
@@ -621,6 +628,7 @@ async function processQueue_REAL(): Promise<number> {
           content: conversationContent,
           created_at: sentAt,
           thread_id: threadId ?? null,
+          gmail_message_id: gmailMessageId ?? null,
         })
         if (insJobErr) {
           console.error("[process-queue-batch REAL] messages insert:", insJobErr)

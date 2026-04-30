@@ -9,6 +9,7 @@ import { useState, useEffect, useCallback, useRef } from "react"
 import { useRouter } from "next/navigation"
 import { supabase } from "@/lib/supabase"
 import { emailBodyToDisplayHtml } from "@/lib/email-body-display"
+import { runGmailInboxSync } from "@/lib/gmail-inbox-sync-client"
 
 type LeadWithMessage = {
   id: string
@@ -24,6 +25,8 @@ type LeadWithMessage = {
   /** Same as `messages.thread_id` in DB — conversation key for loading/saving messages */
   thread_id?: string | null
   last_message: string
+  /** Duplicate CRM rows for the same email — load messages for all IDs as one thread */
+  mergedLeadIds?: string[]
 }
 
 type Message = {
@@ -38,6 +41,29 @@ type Message = {
 
 type Props = {
   leads: LeadWithMessage[]
+}
+
+function dedupeThreadMessages(rows: Message[]): Message[] {
+  const sorted = [...rows].sort(
+    (a, b) =>
+      new Date(a.created_at ?? 0).getTime() -
+      new Date(b.created_at ?? 0).getTime()
+  )
+  const seenId = new Set<string>()
+  const byGmail = new Map<string, Message>()
+  const noGmail: Message[] = []
+  for (const m of sorted) {
+    if (seenId.has(m.id)) continue
+    seenId.add(m.id)
+    const gid = (m as { gmail_message_id?: string | null }).gmail_message_id?.trim()
+    if (gid) byGmail.set(gid, m)
+    else noGmail.push(m)
+  }
+  return [...noGmail, ...byGmail.values()].sort(
+    (a, b) =>
+      new Date(a.created_at ?? 0).getTime() -
+      new Date(b.created_at ?? 0).getTime()
+  )
 }
 
 export function InboxClient({ leads: initialLeads }: Props) {
@@ -57,8 +83,49 @@ export function InboxClient({ leads: initialLeads }: Props) {
     setLeads(initialLeads)
   }, [initialLeads])
 
-  const leadIdsRef = useRef<Set<string>>(new Set(initialLeads.map((l) => l.id)))
-  leadIdsRef.current = new Set(leads.map((l) => l.id))
+  /** Pull Gmail → Supabase so inbound replies appear (no separate worker required). */
+  useEffect(() => {
+    let cancelled = false
+    const lastSyncAt = { current: 0 }
+    const MIN_SYNC_GAP_MS = 35_000
+
+    async function syncPull() {
+      const now = Date.now()
+      if (now - lastSyncAt.current < MIN_SYNC_GAP_MS) return
+      lastSyncAt.current = now
+      const r = await runGmailInboxSync()
+      if (!cancelled && r.ok && (r.imported ?? 0) > 0) router.refresh()
+    }
+
+    void syncPull()
+    const interval = setInterval(() => void syncPull(), 90_000)
+    const onFocus = () => void syncPull()
+    window.addEventListener("focus", onFocus)
+
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+      window.removeEventListener("focus", onFocus)
+    }
+  }, [router])
+
+  const leadIdsRef = useRef<Set<string>>(new Set())
+  leadIdsRef.current = new Set(
+    leads.flatMap((l) => l.mergedLeadIds ?? [l.id])
+  )
+
+  /** Maps any duplicate lead UUID → canonical inbox row id (merged-by-email). */
+  const canonicalLeadIdRef = useRef<Map<string, string>>(new Map())
+  useEffect(() => {
+    const m = new Map<string, string>()
+    for (const l of leads) {
+      const canon = l.id
+      for (const id of l.mergedLeadIds ?? [l.id]) {
+        m.set(id, canon)
+      }
+    }
+    canonicalLeadIdRef.current = m
+  }, [leads])
 
   useEffect(() => {
     const channel = supabase
@@ -100,8 +167,16 @@ export function InboxClient({ leads: initialLeads }: Props) {
           if (!isInList) {
             router.refresh()
           } else if (role === "lead" || role === "inbound") {
+            const canonicalId =
+              canonicalLeadIdRef.current.get(leadId) ?? leadId
+            await supabase
+              .from("leads")
+              .update({ unread: true })
+              .eq("id", canonicalId)
             setLeads((prev) =>
-              prev.map((l) => (l.id === leadId ? { ...l, unread: true } : l))
+              prev.map((l) =>
+                l.id === canonicalId ? { ...l, unread: true } : l
+              )
             )
           }
         }
@@ -119,22 +194,19 @@ export function InboxClient({ leads: initialLeads }: Props) {
       return
     }
 
-    const selectedConversation = { thread_id: selectedLead.thread_id ?? null }
+    const leadIdsForThread = selectedLead.mergedLeadIds?.length
+      ? selectedLead.mergedLeadIds
+      : [selectedLead.id]
 
     async function loadMessages() {
-      if (!selectedConversation.thread_id) {
-        setMessages([])
-        return
-      }
-
       const { data, error } = await supabase
         .from("messages")
         .select("*")
-        .eq("thread_id", selectedConversation.thread_id)
+        .in("lead_id", leadIdsForThread)
         .order("created_at", { ascending: true })
 
       if (!error && data) {
-        setMessages(data as Message[])
+        setMessages(dedupeThreadMessages(data as Message[]))
       } else {
         if (error) console.error("[InboxClient] loadMessages:", error)
         setMessages([])
@@ -143,49 +215,56 @@ export function InboxClient({ leads: initialLeads }: Props) {
 
     void loadMessages()
 
-    if (!selectedConversation.thread_id) {
-      return
-    }
-
-    const channel = supabase
-      .channel(`inbox-messages-thread-${selectedConversation.thread_id}`)
-      .on(
+    const realtimeChannels: ReturnType<typeof supabase.channel>[] = []
+    for (const lid of leadIdsForThread) {
+      const ch = supabase.channel(
+        `inbox-msg-${selectedLead.id}-${lid}`.slice(0, 120)
+      )
+      ch.on(
         "postgres_changes",
         {
           event: "INSERT",
           schema: "public",
           table: "messages",
-          filter: `thread_id=eq.${selectedConversation.thread_id}`,
+          filter: `lead_id=eq.${lid}`,
         },
         (payload) => {
           const newMessage = payload.new as Message
+          if (!leadIdsForThread.includes(newMessage.lead_id as string)) return
           setMessages((prev) => {
             if (prev.some((m) => m.id === newMessage.id)) return prev
-            return [...prev, newMessage]
+            return dedupeThreadMessages([...prev, newMessage])
           })
         }
       )
-      .subscribe()
+      ch.subscribe()
+      realtimeChannels.push(ch)
+    }
 
     return () => {
-      supabase.removeChannel(channel)
+      for (const c of realtimeChannels) {
+        void supabase.removeChannel(c)
+      }
     }
   }, [selectedLead])
 
-  const generateSuggestions = useCallback(async (leadId: string, threadId?: string | null) => {
+  const generateSuggestions = useCallback(async (lead: LeadWithMessage) => {
     const req = ++suggestionsRequestId.current
     setLoadingSuggestions(true)
     setSuggestions([])
     try {
+      const leadIds = lead.mergedLeadIds ?? [lead.id]
       let { data, error } = await supabase
         .from("messages")
         .select("*")
-        .eq("lead_id", leadId)
+        .in("lead_id", leadIds)
         .order("created_at", { ascending: true })
 
       if (req !== suggestionsRequestId.current) return
 
-      const tid = threadId?.trim()
+      data = data ? dedupeThreadMessages(data as Message[]) : data
+
+      const tid = lead.thread_id?.trim()
       if ((!data || data.length === 0) && tid) {
         const r2 = await supabase
           .from("messages")
@@ -193,7 +272,7 @@ export function InboxClient({ leads: initialLeads }: Props) {
           .eq("thread_id", tid)
           .order("created_at", { ascending: true })
         if (req !== suggestionsRequestId.current) return
-        data = r2.data
+        data = r2.data ? dedupeThreadMessages(r2.data as Message[]) : r2.data
         error = r2.error
       }
 
@@ -234,12 +313,16 @@ export function InboxClient({ leads: initialLeads }: Props) {
 
   useEffect(() => {
     if (!selectedLead?.id) return
-    void generateSuggestions(selectedLead.id, selectedLead.thread_id)
-  }, [selectedLead?.id, generateSuggestions])
+    void generateSuggestions(selectedLead)
+  }, [
+    selectedLead?.id,
+    selectedLead?.mergedLeadIds?.join(","),
+    generateSuggestions,
+  ])
 
   function handleRegenerateSuggestions() {
     if (!selectedLead?.id) return
-    void generateSuggestions(selectedLead.id, selectedLead.thread_id)
+    void generateSuggestions(selectedLead)
   }
 
   const searchLower = searchQuery.trim().toLowerCase()
@@ -257,7 +340,7 @@ export function InboxClient({ leads: initialLeads }: Props) {
 
   const filteredLeads = leadsMatchingSearch.filter((lead) => {
     if (activeTab === "all") return true
-    if (activeTab === "unread") return !lead.read
+    if (activeTab === "unread") return Boolean(lead.unread)
     return true
   })
 
@@ -266,10 +349,12 @@ export function InboxClient({ leads: initialLeads }: Props) {
       window.alert("Lead no longer exists")
       return
     }
-    const threadId = selectedLead.thread_id?.trim()
+    const threadId =
+      [...messages].reverse().find((m) => m.thread_id?.trim())?.thread_id?.trim() ??
+      selectedLead.thread_id?.trim()
     if (!threadId) {
       console.warn(
-        "[InboxClient] Cannot send: lead has no thread_id in the database (need a saved message with thread_id)."
+        "[InboxClient] Cannot send: no thread_id on messages yet (wait for sync or send from campaign)."
       )
       return
     }
@@ -344,7 +429,7 @@ export function InboxClient({ leads: initialLeads }: Props) {
                     (
                     {tab.key === "all"
                       ? leads.length
-                      : leads.filter((l) => !l.read).length}
+                      : leads.filter((l) => l.unread).length}
                     )
                   </span>
                 </button>

@@ -139,7 +139,7 @@ export async function processGlobalSingleQueuedSend(
   )
 
   const mailboxByUserId = new Map<string, string | null>()
-  const sendCountByMailbox = new Map<string, number>()
+  const sendCountByUserId = new Map<string, number>()
   const capLoggedForMailbox = new Set<string>()
 
   let candidate: ClaimedCampaignMessageRow | undefined
@@ -155,10 +155,10 @@ export async function processGlobalSingleQueuedSend(
 
     if (!mailbox) continue
 
-    let sentInWindow = sendCountByMailbox.get(mailbox)
+    let sentInWindow = sendCountByUserId.get(uid)
     if (sentInWindow === undefined) {
-      sentInWindow = await countMailboxSendsRolling24h(supabase, mailbox)
-      sendCountByMailbox.set(mailbox, sentInWindow)
+      sentInWindow = await countMailboxSendsRolling24h(supabase, uid)
+      sendCountByUserId.set(uid, sentInWindow)
     }
 
     if (mailboxCap !== null && sentInWindow >= mailboxCap) {

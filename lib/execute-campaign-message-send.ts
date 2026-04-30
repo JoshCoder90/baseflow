@@ -44,7 +44,7 @@ export async function executeClaimedCampaignMessageSend(
   const cap = getEffectiveMailboxRollingSendCap()
   const senderMailbox = await getMailboxEmailForUser(supabase, ownerUserId)
   if (cap !== null && senderMailbox) {
-    const sentLast24h = await countMailboxSendsRolling24h(supabase, senderMailbox)
+    const sentLast24h = await countMailboxSendsRolling24h(supabase, ownerUserId)
     if (sentLast24h >= cap) {
       console.log("Mailbox rolling cap hit (env MAILBOX_ROLLING_SEND_CAP / DISABLE):", senderMailbox)
       await revertCampaignMessageToQueued(
@@ -163,6 +163,7 @@ export async function executeClaimedCampaignMessageSend(
       }
     } else if (sendResult.ok) {
       const threadId = sendResult.threadId
+      const gmailMessageId = sendResult.gmailMessageId
 
       const sentAt = new Date().toISOString()
       const conversationContent =
@@ -176,6 +177,7 @@ export async function executeClaimedCampaignMessageSend(
         content: conversationContent,
         created_at: sentAt,
         thread_id: threadId ?? null,
+        gmail_message_id: gmailMessageId ?? null,
       })
       if (convErr) {
         console.error("[execute-campaign-message-send] messages insert:", convErr)
@@ -191,16 +193,30 @@ export async function executeClaimedCampaignMessageSend(
       const resolvedSender =
         senderMailbox ?? (await getMailboxEmailForUser(supabase, ownerUserId))
 
-      const rowMarkedSent = await persistCampaignMessageSentRow(supabase, {
+      let rowMarkedSent = await persistCampaignMessageSentRow(supabase, {
         messageId: claimed.id,
         sentAt,
         senderMailbox: resolvedSender,
       })
 
       if (!rowMarkedSent) {
-        console.error(
-          "[execute-campaign-message-send] Email delivered but DB did not record sent — UI will stay out of sync until fixed"
-        )
+        const lastChance = await supabase
+          .from("campaign_messages")
+          .update({
+            status: "sent",
+            sent_at: sentAt,
+            next_send_at: null,
+          })
+          .eq("id", claimed.id)
+          .eq("status", "sending")
+        if (!lastChance.error) {
+          rowMarkedSent = true
+        } else {
+          console.error(
+            "[execute-campaign-message-send] Email delivered but DB did not record sent — queue may stay blocked until stale release:",
+            lastChance.error
+          )
+        }
       }
 
       let sentUpdateErr: Error | null = null
@@ -233,6 +249,13 @@ export async function executeClaimedCampaignMessageSend(
         console.error("Failed to mark lead sent:", sentUpdateErr)
       }
     } else {
+      console.warn("[execute-campaign-message-send] Gmail send failed — reverting to queued", {
+        campaignId,
+        campaignMessageId: claimed.id,
+        leadId: lead.id,
+        status: sendResult.ok ? undefined : sendResult.status,
+        error: sendResult.ok ? undefined : sendResult.error,
+      })
       await revertCampaignMessageToQueued(
         supabase,
         claimed.id,

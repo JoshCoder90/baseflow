@@ -4,6 +4,10 @@
  *
  * Configure with `MAILBOX_ROLLING_SEND_CAP` (number) or disable with
  * `MAILBOX_ROLLING_SEND_CAP=0` / `DISABLE_MAILBOX_SEND_CAP=1`.
+ *
+ * Rolling counts use **all `campaign_messages` marked sent** for this user's campaigns
+ * in the last 24h (no `sender_email` filter). That avoids PostgREST errors when
+ * `sender_email` is missing from the schema cache or unused on historical rows.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js"
@@ -57,39 +61,58 @@ export async function getMailboxEmailForUser(
   return String(data.gmail_email).trim().toLowerCase() || null
 }
 
-/** Rolling 24h send count for this mailbox (campaign_messages). */
+const CAMPAIGN_ID_CHUNK = 200
+
+/**
+ * Rolling 24h count of sends for this **user** (via their campaigns). Approximates
+ * per-mailbox volume when one Gmail account is connected.
+ */
 export async function countMailboxSendsRolling24h(
   supabase: SupabaseClient,
-  senderEmail: string
+  ownerUserId: string
 ): Promise<number> {
-  const normalized = senderEmail.trim().toLowerCase()
-  if (!normalized) return 0
+  const since = mailboxSendCountSinceIso()
 
-  const { count, error } = await supabase
-    .from("campaign_messages")
-    .select("id", { count: "exact", head: true })
-    .eq("sender_email", normalized)
-    .eq("status", "sent")
-    .gte("sent_at", mailboxSendCountSinceIso())
+  const { data: campaigns, error: cErr } = await supabase
+    .from("campaigns")
+    .select("id")
+    .eq("user_id", ownerUserId)
 
-  if (error) {
-    console.error(
-      "[mailbox-daily-send-cap] count query failed — not blocking sends (fail-open). Fix DB/cache if this persists:",
-      error
-    )
-    /** Never treat a failed analytics query as “at cap” or every send is blocked (common after deploy / schema drift). */
+  if (cErr) {
+    console.warn("[mailbox-daily-send-cap] campaigns query:", cErr.message ?? cErr)
     return 0
   }
 
-  return count ?? 0
+  const ids = (campaigns ?? []).map((r) => r.id as string).filter(Boolean)
+  if (ids.length === 0) return 0
+
+  let total = 0
+  for (let i = 0; i < ids.length; i += CAMPAIGN_ID_CHUNK) {
+    const chunk = ids.slice(i, i + CAMPAIGN_ID_CHUNK)
+    const { count, error } = await supabase
+      .from("campaign_messages")
+      .select("id", { count: "exact", head: true })
+      .in("campaign_id", chunk)
+      .eq("status", "sent")
+      .gte("sent_at", since)
+
+    if (error) {
+      console.warn("[mailbox-daily-send-cap] sent count query:", error.message ?? error)
+      return 0
+    }
+    total += count ?? 0
+  }
+
+  return total
 }
 
 export async function isMailboxAtDailySendCap(
   supabase: SupabaseClient,
-  senderEmail: string | null
+  senderEmail: string | null,
+  ownerUserId: string
 ): Promise<boolean> {
   const cap = getEffectiveMailboxRollingSendCap()
   if (cap === null || !senderEmail) return false
-  const n = await countMailboxSendsRolling24h(supabase, senderEmail)
+  const n = await countMailboxSendsRolling24h(supabase, ownerUserId)
   return n >= cap
 }

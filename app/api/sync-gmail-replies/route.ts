@@ -2,10 +2,7 @@ let isRunning = false;
 
 import { NextResponse } from "next/server"
 import { createClient } from "@supabase/supabase-js"
-import {
-  refreshGmailAccessToken,
-  isGmailReconnectRequiredError,
-} from "@/lib/gmail-auth"
+import { refreshGmailAccessToken } from "@/lib/gmail-auth"
 import { createClient as createServerClient } from "@/lib/supabase/server"
 import {
   consumeRateLimit,
@@ -15,10 +12,12 @@ import {
 import { heavyRouteIpLimitResponse } from "@/lib/ip-rate-limit"
 import {
   type GmailMessageFull,
-  extractEmailFromFromHeader,
-  plainTextBodyFromGmailMessage,
 } from "@/lib/gmail-inbound-parse"
-import { bumpConversationLastMessage } from "@/lib/bump-conversation-last-message"
+import {
+  gmailGetJson,
+  importGmailMessageIntoCrm,
+  syncKnownCrmThreads,
+} from "@/lib/gmail-crm-sync"
 
 let lastRun = 0
 
@@ -31,56 +30,19 @@ const GMAIL_LIST = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
 const MAX_LIST = 100
 const MAX_FULL_FETCH = 100
 
-async function gmailGetJson(
-  accessToken: string,
-  url: string
-): Promise<{ ok: boolean; status: number; body: unknown }> {
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  })
-  let body: unknown = null
-  try {
-    body = await res.json()
-  } catch {
-    body = null
-  }
-  return { ok: res.ok, status: res.status, body }
-}
-
-function cleanEmailReply(body: string) {
-  if (!body) return body
-
-  let cleaned = body
-
-  // 1. Remove everything after "On ... wrote:"
-  cleaned = cleaned.split(/On\s.+wrote:/i)[0]
-
-  // 2. Remove everything after common separators
-  cleaned = cleaned.split(/From:\s/i)[0]
-  cleaned = cleaned.split(/Sent:\s/i)[0]
-
-  // 3. Remove quoted lines starting with >
-  cleaned = cleaned
-    .split("\n")
-    .filter((line) => !line.trim().startsWith(">"))
-    .join("\n")
-
-  // 4. Remove extra whitespace + empty lines
-  cleaned = cleaned
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .join("\n")
-
-  return cleaned.trim()
-}
-
 /**
- * Pull Gmail inbox (list q=in:inbox), fetch full messages, insert inbound rows only when the Gmail thread
- * already exists in CRM: a `messages` row with the same `thread_id` and a `lead_id` owned by this user.
- * Does not match by sender email or create leads — non-CRM mail is ignored. Inbox UI is DB-only.
- * Requires Gmail scope including gmail.readonly (users reconnect after scope change).
+ * Sync Gmail into CRM `messages`: (1) full fetch for every thread already linked in the DB,
+ * (2) scan `in:inbox` for anything missed. Imports inbound replies and your outbound Gmail sends
+ * when the thread matches a lead. Requires gmail.readonly (reconnect if scopes changed).
  */
+type GmailConnectionRow = {
+  id: string
+  user_id: string
+  access_token?: string | null
+  refresh_token?: string | null
+  gmail_email?: string | null
+}
+
 async function handleSync(): Promise<NextResponse> {
   try {
     if (!supabaseServiceKey) {
@@ -92,13 +54,12 @@ async function handleSync(): Promise<NextResponse> {
     const { data: connections, error } = await supabase
       .from("gmail_connections")
       .select("*")
-      .limit(1)
 
     if (error) {
       console.error("[sync-gmail-replies] gmail_connections:", error.message)
     }
 
-    if (!connections || connections.length === 0) {
+    if (!connections?.length) {
       console.log("No Gmail connections found at all")
       return NextResponse.json(
         {
@@ -111,77 +72,119 @@ async function handleSync(): Promise<NextResponse> {
       )
     }
 
-    const connection = connections[0] as {
-      id: string
-      user_id: string
-      access_token?: string | null
-      refresh_token?: string | null
-      gmail_email?: string | null
-      connected?: boolean | null
-      gmail_replies_synced_at?: string | null
-    }
+    let totalImported = 0
+    let totalListed = 0
+    let totalChecked = 0
+    let lastListError: {
+      status: number
+      body: unknown
+    } | null = null
 
-    const { count: campaignTotal } = await supabase
-      .from("campaigns")
-      .select("*", { count: "exact", head: true })
-      .eq("user_id", connection.user_id)
-    if ((campaignTotal ?? 0) > 0) {
-      const { count: notCompleted } = await supabase
-        .from("campaigns")
-        .select("*", { count: "exact", head: true })
-        .eq("user_id", connection.user_id)
-        .neq("status", "completed")
-      if ((notCompleted ?? 0) === 0) {
-        console.log("[STOP] Gmail sync halted - campaign completed")
-        return NextResponse.json({
-          success: true,
-          skipped: true,
-          reason: "all_campaigns_completed",
-          imported: 0,
-        })
-      }
-    }
+    for (const raw of connections) {
+      const connection = raw as GmailConnectionRow
+      let accessToken = connection.access_token as string | undefined
 
-    let accessToken = connection.access_token as string | undefined
-    let reconnectRequired = false
-    if (connection.refresh_token) {
-      try {
-        accessToken = await refreshGmailAccessToken(connection.refresh_token as string)
-        await supabase
-          .from("gmail_connections")
-          .update({ access_token: accessToken, updated_at: new Date().toISOString() })
-          .eq("id", connection.id)
-      } catch (e) {
-        console.error("[sync-gmail-replies] token refresh:", e)
-        if (isGmailReconnectRequiredError(e)) {
-          reconnectRequired = true
+      if (connection.refresh_token) {
+        try {
+          accessToken = await refreshGmailAccessToken(connection.refresh_token as string)
+          await supabase
+            .from("gmail_connections")
+            .update({
+              access_token: accessToken,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", connection.id)
+        } catch (e) {
+          console.error("[sync-gmail-replies] token refresh:", connection.id, e)
+          continue
         }
       }
-    }
 
-    if (!accessToken) {
-      return NextResponse.json(
-        {
-          error: reconnectRequired
-            ? "GMAIL_RECONNECT_REQUIRED"
-            : "Gmail token invalid. Reconnect Gmail in settings.",
-        },
-        { status: 400 }
+      if (!accessToken) {
+        console.warn("[sync-gmail-replies] skipping connection without token:", connection.id)
+        continue
+      }
+
+      const syncConn = {
+        id: connection.id,
+        user_id: connection.user_id,
+        gmail_email: connection.gmail_email,
+      }
+
+      const importedFromThreads = await syncKnownCrmThreads(
+        supabase,
+        syncConn,
+        accessToken
       )
+      totalImported += importedFromThreads
+
+      const listParams = new URLSearchParams({
+        q: "in:inbox",
+        maxResults: String(MAX_LIST),
+      })
+      const listUrl = `${GMAIL_LIST}?${listParams.toString()}`
+      const listRes = await gmailGetJson(accessToken, listUrl)
+
+      const nowIso = new Date().toISOString()
+
+      if (!listRes.ok) {
+        lastListError = { status: listRes.status, body: listRes.body }
+        console.error(
+          "[sync-gmail-replies] inbox list failed:",
+          connection.user_id,
+          listRes.status
+        )
+        await supabase
+          .from("gmail_connections")
+          .update({ gmail_replies_synced_at: nowIso })
+          .eq("id", connection.id)
+        continue
+      }
+
+      const listPayload = listRes.body as {
+        messages?: { id: string }[]
+      }
+      const rawIds = (listPayload.messages ?? []).map((m) => m.id).filter(Boolean)
+      totalListed += rawIds.length
+
+      if (rawIds.length === 0) {
+        await supabase
+          .from("gmail_connections")
+          .update({ gmail_replies_synced_at: nowIso })
+          .eq("id", connection.id)
+        continue
+      }
+
+      const toFetch = rawIds.slice(0, MAX_FULL_FETCH)
+      totalChecked += toFetch.length
+
+      for (const msgId of toFetch) {
+        const fullUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(msgId)}?format=full`
+        const fullRes = await gmailGetJson(accessToken, fullUrl)
+        if (!fullRes.ok) continue
+
+        const gm = fullRes.body as GmailMessageFull
+        if (!gm.id) continue
+
+        const r = await importGmailMessageIntoCrm(supabase, gm, syncConn)
+        if (r === "imported") totalImported++
+      }
+
+      await supabase
+        .from("gmail_connections")
+        .update({ gmail_replies_synced_at: nowIso })
+        .eq("id", connection.id)
     }
 
-    const listParams = new URLSearchParams({
-      q: "in:inbox",
-      maxResults: String(MAX_LIST),
-    })
-    const listUrl = `${GMAIL_LIST}?${listParams.toString()}`
-
-    const listRes = await gmailGetJson(accessToken, listUrl)
-    if (!listRes.ok) {
-      const errBody = listRes.body as { error?: { message?: string; status?: string } } | null
-      const msg = errBody?.error?.message ?? `Gmail list failed (${listRes.status})`
+    if (totalImported === 0 && totalListed === 0 && lastListError) {
+      const errBody = lastListError.body as {
+        error?: { message?: string; status?: string }
+      } | null
+      const msg =
+        errBody?.error?.message ??
+        `Gmail list failed (${lastListError.status})`
       const needsScope =
-        listRes.status === 403 ||
+        lastListError.status === 403 ||
         (typeof msg === "string" && msg.toLowerCase().includes("insufficient"))
       return NextResponse.json(
         {
@@ -194,144 +197,11 @@ async function handleSync(): Promise<NextResponse> {
       )
     }
 
-    const listPayload = listRes.body as { messages?: { id: string }[]; nextPageToken?: string }
-    const messages = listPayload.messages
-    const rawIds = (listPayload.messages ?? []).map((m) => m.id).filter(Boolean)
-    if (rawIds.length === 0) {
-      await supabase
-        .from("gmail_connections")
-        .update({ gmail_replies_synced_at: new Date().toISOString() })
-        .eq("id", connection.id)
-      return NextResponse.json({ success: true, imported: 0, checked: 0 })
-    }
-
-    const toFetch = rawIds.slice(0, MAX_FULL_FETCH)
-
-    let imported = 0
-    const nowIso = new Date().toISOString()
-
-    for (const msgId of toFetch) {
-      const fullUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(msgId)}?format=full`
-      const fullRes = await gmailGetJson(accessToken, fullUrl)
-      if (!fullRes.ok) {
-        continue
-      }
-
-      const gm = fullRes.body as GmailMessageFull
-      if (!gm.id) {
-        continue
-      }
-
-      const gmailMessageId = gm.id
-
-      const { data: existingDup } = await supabase
-        .from("messages")
-        .select("*")
-        .eq("gmail_message_id", gmailMessageId)
-        .maybeSingle()
-
-      if (existingDup) {
-        continue
-      }
-
-      const headerList = gm.payload?.headers ?? []
-      const fromHeader =
-        headerList.find((h) => h.name === "From")?.value || ""
-
-      const threadId = gm.threadId ?? null
-      const fromEmail = extractEmailFromFromHeader(fromHeader)
-      const snippet = (gm as { snippet?: string }).snippet || ""
-      const body =
-        plainTextBodyFromGmailMessage(gm).trim() ||
-        snippet.trim() ||
-        "No content"
-
-      const from = (fromHeader || "").toLowerCase() || ""
-
-      if (
-        from.includes("mailer-daemon") ||
-        from.includes("postmaster") ||
-        from.includes("no-reply") ||
-        body.toLowerCase().includes("delivery failed") ||
-        body.toLowerCase().includes("not delivered") ||
-        body.toLowerCase().includes("couldn't be delivered")
-      ) {
-        // silent skip (no log)
-        continue
-      }
-
-      const cleanedBody = cleanEmailReply(body)
-
-      if (!threadId) {
-        continue
-      }
-
-      const myEmail = (connection.gmail_email ?? "").trim().toLowerCase()
-      if (fromEmail && myEmail && fromEmail.toLowerCase() === myEmail) {
-        continue
-      }
-
-      const { data: threadAnchor } = await supabase
-        .from("messages")
-        .select("*")
-        .eq("thread_id", threadId)
-        .not("lead_id", "is", null)
-        .order("created_at", { ascending: true })
-        .limit(1)
-        .maybeSingle()
-
-      const anchorLeadId = threadAnchor?.lead_id as string | undefined
-      if (!anchorLeadId) {
-        continue
-      }
-
-      const { data: owningLead, error: leadOwnErr } = await supabase
-        .from("leads")
-        .select("id, user_id")
-        .eq("id", anchorLeadId)
-        .maybeSingle()
-
-      if (leadOwnErr || !owningLead || owningLead.user_id !== connection.user_id) {
-        continue
-      }
-
-      const matchedLeadId = anchorLeadId
-
-      const messageAt = new Date().toISOString()
-      const { error: insErr } = await supabase.from("messages").insert({
-        role: "inbound",
-        content: cleanedBody,
-        thread_id: threadId,
-        lead_id: matchedLeadId,
-        gmail_message_id: gmailMessageId,
-      })
-
-      if (!insErr) {
-        imported++
-        console.log("[sync-gmail-replies] inserted inbound thread_id:", threadId)
-        if (threadId && connection.user_id) {
-          await bumpConversationLastMessage(supabase, {
-            userId: connection.user_id,
-            threadId,
-            messageAt,
-            lastMessageRole: "inbound",
-          })
-        }
-      } else {
-        console.error("[sync-gmail-replies] insert:", insErr)
-      }
-    }
-
-    await supabase
-      .from("gmail_connections")
-      .update({ gmail_replies_synced_at: nowIso })
-      .eq("id", connection.id)
-
     return NextResponse.json({
       success: true,
-      imported,
-      checked: toFetch.length,
-      listed: rawIds.length,
+      imported: totalImported,
+      checked: totalChecked,
+      listed: totalListed,
     })
   } catch (err) {
     console.error("Sync error:", err)

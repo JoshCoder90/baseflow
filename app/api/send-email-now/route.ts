@@ -87,6 +87,8 @@ export async function POST(req: Request) {
   }
 
   const campaignId = msg.campaign_id as string
+  const dbg = (extra: Record<string, unknown>) =>
+    console.info("[send-email-now]", { messageId, campaignId, ...extra })
   const campaign = await getCampaign(supabase, campaignId, user.id)
   if (!campaign) {
     return NextResponse.json({ error: "Campaign not found" }, { status: 404 })
@@ -103,6 +105,7 @@ export async function POST(req: Request) {
     messageNextSendAt: msg.next_send_at as string | null,
   })
   if (gapMs > 0) {
+    dbg({ skipped: true, reason: "send_gap", retryAfterMs: gapMs })
     return NextResponse.json({
       ok: true,
       skipped: true,
@@ -111,6 +114,7 @@ export async function POST(req: Request) {
     })
   }
 
+  /** Must match DB: partial unique index allows only one `sending` row per campaign — count all of them (not “recent only”). */
   const { count: siblingSending } = await supabase
     .from("campaign_messages")
     .select("id", { count: "exact", head: true })
@@ -118,6 +122,7 @@ export async function POST(req: Request) {
     .eq("status", "sending")
 
   if ((siblingSending ?? 0) > 0) {
+    dbg({ skipped: true, reason: "send_in_progress", siblingSending })
     return NextResponse.json({
       ok: true,
       skipped: true,
@@ -126,10 +131,8 @@ export async function POST(req: Request) {
   }
 
   const mailbox = await getMailboxEmailForUser(supabase, user.id)
-  if (await isMailboxAtDailySendCap(supabase, mailbox)) {
-    if (mailbox) {
-      console.log("Daily cap hit for mailbox:", mailbox)
-    }
+  if (await isMailboxAtDailySendCap(supabase, mailbox, user.id)) {
+    dbg({ skipped: true, reason: "daily_mailbox_send_cap", mailbox })
     return NextResponse.json({
       ok: true,
       skipped: true,
@@ -137,24 +140,39 @@ export async function POST(req: Request) {
     })
   }
 
-  const claimedAt = new Date().toISOString()
-  const { data: claimed, error: claimErr } = await supabase
-    .from("campaign_messages")
-    .update({ status: "sending", sending_claimed_at: claimedAt })
-    .eq("id", messageId)
-    .eq("status", "queued")
-    .select(SELECT_FIELDS)
-    .maybeSingle()
+  const tryClaim = async (): Promise<ClaimedCampaignMessageRow | null> => {
+    const claimedAt = new Date().toISOString()
+    const { data, error } = await supabase
+      .from("campaign_messages")
+      .update({ status: "sending", sending_claimed_at: claimedAt })
+      .eq("id", messageId)
+      .eq("status", "queued")
+      .select(SELECT_FIELDS)
+      .maybeSingle()
+    if (error) {
+      console.warn("[send-email-now] claim update error:", error.message ?? error)
+      return null
+    }
+    return data ? (data as ClaimedCampaignMessageRow) : null
+  }
 
-  if (claimErr || !claimed) {
+  let claimedRow = await tryClaim()
+  if (!claimedRow) {
+    console.warn("[send-email-now] claim_failed — retrying after stale release", {
+      messageId,
+      campaignId,
+    })
+    await releaseStaleSendingClaims(supabase)
+    claimedRow = await tryClaim()
+  }
+  if (!claimedRow) {
+    dbg({ skipped: true, reason: "claim_failed" })
     return NextResponse.json({
       ok: true,
       skipped: true,
       reason: "claim_failed",
     })
   }
-
-  const claimedRow = claimed as ClaimedCampaignMessageRow
 
   const { data: campFresh, error: freshErr } = await supabase
     .from("campaigns")

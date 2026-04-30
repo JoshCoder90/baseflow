@@ -4,7 +4,8 @@
  * Gmail / thread inbox UI — 100% database-driven.
  * - Conversation list and message bodies: `supabase.from("messages").select("*")` only (grouped by `thread_id`).
  * - Supporting data: `leads`, `campaigns`, `conversations` from Supabase for labels, niche, read state.
- * - Gmail is not called here; sending uses `/api/send-reply`; inbound mail is inserted via background sync.
+ * - On load, calls GET `/api/sync-gmail-replies` (throttled) so inbound appears without a worker.
+ * - Sending uses `/api/send-reply`.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react"
@@ -14,6 +15,12 @@ import {
   GMAIL_RECONNECT_REQUIRED,
   useGmailReconnectOptional,
 } from "@/app/providers/GmailReconnectProvider"
+import {
+  fetchAllCampaignsForDashboardUser,
+  fetchAllLeadsForDashboardUser,
+  fetchAllMessagesForDashboardInbox,
+} from "@/app/(dashboard)/inbox/inbox-data"
+import { runGmailInboxSync } from "@/lib/gmail-inbox-sync-client"
 
 type AudienceNicheEmbed = {
   niche?: string | null
@@ -90,75 +97,6 @@ function isInboundMessageRole(role: string | null | undefined): boolean {
   return r === "inbound" || r === "lead"
 }
 
-const INBOX_MESSAGES_PAGE = 1000
-
-/** Paginate past PostgREST default max so every thread’s latest message is included. */
-async function fetchAllInboxMessages(): Promise<{
-  data: Message[]
-  error: { message: string } | null
-}> {
-  const out: Message[] = []
-  for (let from = 0; ; from += INBOX_MESSAGES_PAGE) {
-    const to = from + INBOX_MESSAGES_PAGE - 1
-    const { data, error } = await supabase
-      .from("messages")
-      .select("*")
-      .not("thread_id", "is", null)
-      .order("created_at", { ascending: false })
-      .range(from, to)
-    if (error) return { data: out, error: { message: error.message } }
-    const chunk = (data ?? []) as unknown as Message[]
-    out.push(...chunk)
-    if (chunk.length < INBOX_MESSAGES_PAGE) break
-  }
-  return { data: out, error: null }
-}
-
-const LEADS_PAGE = 1000
-
-/** Full leads table for inbox (paginated past PostgREST default max). RLS scopes rows. */
-async function fetchAllLeads(): Promise<{
-  data: LeadEmbed[]
-  error: { message: string } | null
-}> {
-  const out: LeadEmbed[] = []
-  for (let from = 0; ; from += LEADS_PAGE) {
-    const to = from + LEADS_PAGE - 1
-    const { data, error } = await supabase
-      .from("leads")
-      .select("*")
-      .order("id", { ascending: true })
-      .range(from, to)
-    if (error) return { data: out, error: { message: error.message } }
-    const chunk = (data ?? []) as LeadEmbed[]
-    out.push(...chunk)
-    if (chunk.length < LEADS_PAGE) break
-  }
-  return { data: out, error: null }
-}
-
-const CAMPAIGNS_PAGE = 1000
-
-async function fetchAllCampaigns(): Promise<{
-  data: InboxCampaignRow[]
-  error: { message: string } | null
-}> {
-  const out: InboxCampaignRow[] = []
-  for (let from = 0; ; from += CAMPAIGNS_PAGE) {
-    const to = from + CAMPAIGNS_PAGE - 1
-    const { data, error } = await supabase
-      .from("campaigns")
-      .select("*")
-      .order("id", { ascending: true })
-      .range(from, to)
-    if (error) return { data: out, error: { message: error.message } }
-    const chunk = (data ?? []) as InboxCampaignRow[]
-    out.push(...chunk)
-    if (chunk.length < CAMPAIGNS_PAGE) break
-  }
-  return { data: out, error: null }
-}
-
 /** One row per `messages.thread_id` — built only from DB message rows, not from Gmail API. */
 type InboxThread = {
   threadId: string
@@ -229,6 +167,7 @@ export default function InboxPage() {
   const [search, setSearch] = useState("")
   const [activeTab, setActiveTab] = useState<"all" | "unread">("all")
   const aiRequestSeq = useRef(0)
+  const lastGmailSyncMsRef = useRef(0)
 
   const generateReplies = useCallback(async (threadMessages: Message[]) => {
     if (threadMessages.length === 0) return
@@ -278,10 +217,23 @@ export default function InboxPage() {
       authenticatedUserId: inboxUser?.id ?? null,
     })
 
+    if (!inboxUser?.id) {
+      setThreads([])
+      return
+    }
+
+    const uid = inboxUser.id
+
+    const nowMs = Date.now()
+    if (nowMs - lastGmailSyncMsRef.current >= 35_000) {
+      lastGmailSyncMsRef.current = nowMs
+      await runGmailInboxSync()
+    }
+
     const [msgRes, leadsRes, campaignsRes] = await Promise.all([
-      fetchAllInboxMessages(),
-      fetchAllLeads(),
-      fetchAllCampaigns(),
+      fetchAllMessagesForDashboardInbox(supabase, uid),
+      fetchAllLeadsForDashboardUser(supabase, uid),
+      fetchAllCampaignsForDashboardUser(supabase, uid),
     ])
 
     if (msgRes.error) {
@@ -298,9 +250,9 @@ export default function InboxPage() {
       console.error("[dashboard_inbox] secondary campaigns query error:", campaignsRes.error)
     }
 
-    const rows = msgRes.data
-    const leads = leadsRes.data
-    const campaigns = campaignsRes.data
+    const rows = msgRes.data as unknown as Message[]
+    const leads = leadsRes.data as unknown as LeadEmbed[]
+    const campaigns = campaignsRes.data as unknown as InboxCampaignRow[]
 
     if (!rows.length) {
       setThreads([])
@@ -379,7 +331,7 @@ export default function InboxPage() {
       })
     }
 
-    const formatted: InboxThread[] = conversationsWithData.map((conversation) => {
+    const formattedRaw: InboxThread[] = conversationsWithData.map((conversation) => {
       const threadId = conversation.thread_id
       const msgs = conversation.messages
       const lead = conversation.lead
@@ -417,6 +369,8 @@ export default function InboxPage() {
         isUnread,
       }
     })
+
+    const formatted = formattedRaw.filter((t) => t.lead != null)
 
     formatted.sort((a, b) => {
       const tb = new Date(b.lastMessageAt).getTime()

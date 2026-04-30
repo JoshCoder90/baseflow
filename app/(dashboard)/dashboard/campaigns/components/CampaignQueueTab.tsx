@@ -66,9 +66,26 @@ export function CampaignQueueTab({
 }: Props) {
   const [tick, setTick] = useState(Date.now())
   const [inflightIds, setInflightIds] = useState<Set<string>>(() => new Set())
+  /** In-flight POST guard — cleared in `finally` after each attempt. */
   const triggeredRef = useRef<Set<string>>(new Set())
+  /** After a successful API send, block only this message id briefly so refetch can run (stops pre-refetch duplicate POSTs without deadlocking other leads). */
+  const postSuccessCooldownUntilRef = useRef<Map<string, number>>(new Map())
+  const POST_OK_COOLDOWN_MS = 6500
+
   /** Server enforces CAMPAIGN_SEND_GAP_MS — block local re-triggers until retry window (avoids spam). */
   const gapBlockedUntilRef = useRef(0)
+
+  useEffect(() => {
+    for (const row of queueMessages) {
+      if (
+        row.status === "sent" ||
+        row.sent_at ||
+        row.status === "failed"
+      ) {
+        postSuccessCooldownUntilRef.current.delete(row.id)
+      }
+    }
+  }, [queueMessages])
 
   const tickMs = useMemo(() => {
     const now = Date.now()
@@ -88,6 +105,9 @@ export function CampaignQueueTab({
   }, [tickMs])
 
   const triggerSend = useCallback(async (messageId: string) => {
+    const coolUntil = postSuccessCooldownUntilRef.current.get(messageId) ?? 0
+    if (Date.now() < coolUntil) return
+
     if (triggeredRef.current.has(messageId)) return
     triggeredRef.current.add(messageId)
     setInflightIds((prev) => new Set(prev).add(messageId))
@@ -110,40 +130,30 @@ export function CampaignQueueTab({
         /* ignore */
       }
 
-      if (res.status === 409 && data?.reason === "campaign_not_active") {
-        triggeredRef.current.delete(messageId)
-      } else if (res.status === 429) {
-        /* Rate limit — back off briefly (was HEAVY_ROUTE 10/10s; queue uses a higher bucket). */
-        triggeredRef.current.delete(messageId)
+      if (res.status === 429) {
         gapBlockedUntilRef.current = Math.max(
           gapBlockedUntilRef.current,
           Date.now() + 6000
         )
-      } else if (!res.ok && res.status >= 500) {
-        triggeredRef.current.delete(messageId)
-      } else if (data?.skipped && data?.reason === "claim_failed") {
-        /* worker won the row — stop retrying */
-      } else if (data?.skipped && data?.reason === "daily_mailbox_send_cap") {
-        /* cap may be cleared or env changed — allow next poll to retry */
-        triggeredRef.current.delete(messageId)
       } else if (data?.skipped && data?.reason === "send_gap") {
         const wait =
           typeof data.retryAfterMs === "number"
             ? data.retryAfterMs
             : CAMPAIGN_SEND_GAP_MS
         gapBlockedUntilRef.current = Date.now() + wait
-        triggeredRef.current.delete(messageId)
-      } else if (data?.skipped && data?.reason === "send_in_progress") {
-        triggeredRef.current.delete(messageId)
       }
 
       if (res.ok && data?.skipped === false) {
-        triggeredRef.current.delete(messageId)
+        postSuccessCooldownUntilRef.current.set(
+          messageId,
+          Date.now() + POST_OK_COOLDOWN_MS
+        )
         onSendComplete?.()
       }
     } catch {
-      triggeredRef.current.delete(messageId)
+      /* network — allow retry next tick */
     } finally {
+      triggeredRef.current.delete(messageId)
       setInflightIds((prev) => {
         const next = new Set(prev)
         next.delete(messageId)
@@ -160,13 +170,12 @@ export function CampaignQueueTab({
     if (Date.now() < gapBlockedUntilRef.current) return
 
     const dueQueued = queueMessages
-      .filter(
-        (row) =>
-          row.status === "queued" &&
-          !!row.next_send_at &&
-          !row.sent_at &&
-          nextSendAtToMs(row.next_send_at) <= Date.now()
-      )
+      .filter((row) => {
+        if (row.status !== "queued" || !row.next_send_at || row.sent_at) return false
+        if (nextSendAtToMs(row.next_send_at) > Date.now()) return false
+        const coolUntil = postSuccessCooldownUntilRef.current.get(row.id) ?? 0
+        return Date.now() >= coolUntil
+      })
       .sort(
         (a, b) =>
           nextSendAtToMs(a.next_send_at!) -

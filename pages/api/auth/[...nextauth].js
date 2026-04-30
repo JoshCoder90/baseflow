@@ -1,6 +1,38 @@
 import NextAuth from "next-auth"
 import GoogleProvider from "next-auth/providers/google"
 
+/**
+ * Supabase JS v2 admin API has listUsers / getUserById but no getUserByEmail.
+ * Paginate until we find a matching auth user (case-insensitive).
+ */
+async function getAdminUserByEmail(supabase, email) {
+  if (!email || typeof email !== "string") return null
+  const target = email.trim().toLowerCase()
+  let page = 1
+  const perPage = 200
+  const maxPages = 100
+
+  for (let i = 0; i < maxPages; i++) {
+    const { data, error } = await supabase.auth.admin.listUsers({ page, perPage })
+    if (error) {
+      console.error("[nextauth] admin.listUsers:", error.message)
+      return null
+    }
+    const users = data?.users ?? []
+    const hit = users.find(
+      (u) => (u.email ?? "").trim().toLowerCase() === target
+    )
+    if (hit) return hit
+
+    if (users.length === 0) break
+    if (users.length < perPage) break
+
+    const next = data?.nextPage
+    page = typeof next === "number" && !Number.isNaN(next) ? next : page + 1
+  }
+  return null
+}
+
 export const authOptions = {
   providers: [
     GoogleProvider({
@@ -35,7 +67,7 @@ export const authOptions = {
             process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY
           )
 
-          const { data: { user: supabaseUser } } = await supabase.auth.admin.getUserByEmail(email)
+          const supabaseUser = await getAdminUserByEmail(supabase, email)
 
           if (supabaseUser && email && access_token) {
             const { data: existingRow } = await supabase

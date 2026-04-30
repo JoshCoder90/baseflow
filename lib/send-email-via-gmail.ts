@@ -16,7 +16,7 @@ async function sendViaGmail(
   toEmail: string,
   subject: string,
   html: string
-): Promise<{ threadId?: string }> {
+): Promise<{ threadId?: string; gmailMessageId?: string }> {
   const message = [
     `From: ${fromEmail}`,
     `To: ${toEmail}`,
@@ -51,6 +51,7 @@ async function sendViaGmail(
   }
 
   const response = (await res.json()) as {
+    id?: string
     threadId?: string
     data?: { threadId?: string }
   }
@@ -58,11 +59,12 @@ async function sendViaGmail(
   console.log("Gmail response:", response)
 
   const threadId = response.data?.threadId ?? response.threadId
-  return { threadId }
+  const gmailMessageId = response.id
+  return { threadId, gmailMessageId }
 }
 
 export type SendOutboundEmailViaGmailResult =
-  | { ok: true; threadId?: string }
+  | { ok: true; threadId?: string; gmailMessageId?: string }
   | {
       ok: false
       status: number
@@ -162,7 +164,11 @@ export async function sendOutboundEmailViaGmailServiceRole(
       subject,
       html
     )
-    return { ok: true, threadId: gmailSend.threadId }
+    return {
+      ok: true,
+      threadId: gmailSend.threadId,
+      gmailMessageId: gmailSend.gmailMessageId,
+    }
   } catch (err) {
     console.error("SEND EMAIL ERROR:", err)
     const message =

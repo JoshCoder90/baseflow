@@ -1,12 +1,13 @@
 import type { SupabaseClient } from "@supabase/supabase-js"
 
-const DEFAULT_STALE_MS = 15 * 60 * 1000
+/** Must be shorter than users retrying: zombies block other rows via unique index `one_sending_per_campaign`. */
+const DEFAULT_STALE_MS = 90 * 1000
 
-function staleSendingMs(): number {
+export function getStaleSendingReleaseMs(): number {
   const raw = process.env.STALE_SENDING_RELEASE_MS?.trim()
   if (!raw) return DEFAULT_STALE_MS
   const n = Number.parseInt(raw, 10)
-  if (!Number.isFinite(n) || n < 60_000) return DEFAULT_STALE_MS
+  if (!Number.isFinite(n) || n < 30_000) return DEFAULT_STALE_MS
   return Math.min(n, 24 * 60 * 60 * 1000)
 }
 
@@ -17,7 +18,7 @@ function staleSendingMs(): number {
 export async function releaseStaleSendingClaims(
   supabase: SupabaseClient
 ): Promise<{ released: number }> {
-  const cutoff = new Date(Date.now() - staleSendingMs()).toISOString()
+  const cutoff = new Date(Date.now() - getStaleSendingReleaseMs()).toISOString()
 
   const { data, error } = await supabase
     .from("campaign_messages")
@@ -39,7 +40,7 @@ export async function releaseStaleSendingClaims(
   const n = Array.isArray(data) ? data.length : 0
   if (n > 0) {
     console.warn(
-      `[release-stale-sending] reverted ${n} stuck row(s) (threshold ${staleSendingMs()}ms)`
+      `[release-stale-sending] reverted ${n} stuck row(s) (threshold ${getStaleSendingReleaseMs()}ms)`
     )
   }
   return { released: n }
