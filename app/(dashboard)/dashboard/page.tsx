@@ -229,26 +229,28 @@ export default function DashboardPage() {
   return (
     <div
       key={pathname}
-      className="w-full min-h-screen bg-black px-6 md:px-8 xl:px-12 py-6"
+      className="w-full min-h-0 px-0 py-0 md:px-2 xl:px-4"
     >
-      <div className="w-full space-y-6">
-      <header className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-6">
+      <div className="w-full space-y-8">
+      <header className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h1 className="text-3xl font-semibold tracking-tight text-white">Dashboard</h1>
-          <p className="text-zinc-500 mt-1.5 text-sm">
+          <h1 className="text-3xl font-semibold tracking-tight text-white sm:text-[2rem]">
+            Dashboard
+          </h1>
+          <p className="mt-1.5 max-w-xl text-sm leading-relaxed text-zinc-500">
             What&apos;s happening, what needs you, and what to do next.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
           <Link
             href="/dashboard/campaigns"
-            className="rounded-full bg-white px-4 py-2 text-sm font-medium text-zinc-900 hover:bg-zinc-100 transition"
+            className="inline-flex items-center justify-center rounded-full bg-white px-5 py-2.5 text-sm font-semibold text-zinc-950 shadow-[0_0_0_1px_rgba(255,255,255,0.2)_inset,0_14px_40px_-18px_rgba(255,255,255,0.35)] transition hover:bg-zinc-100"
           >
             New campaign
           </Link>
           <Link
             href="/dashboard/inbox"
-            className="rounded-full border border-zinc-700 bg-zinc-900/80 px-4 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 hover:border-zinc-600 transition"
+            className="inline-flex items-center justify-center rounded-full border border-white/[0.12] bg-white/[0.04] px-5 py-2.5 text-sm font-medium text-zinc-100 shadow-[0_0_0_1px_rgba(255,255,255,0.04)_inset] transition hover:border-white/20 hover:bg-white/[0.07]"
           >
             Open inbox
           </Link>
@@ -257,96 +259,101 @@ export default function DashboardPage() {
 
       {/* Needs attention — first */}
       <section
-        className="w-full rounded-2xl border border-orange-500/20 p-6"
+        className="bf-panel relative w-full overflow-hidden rounded-2xl p-6 ring-1 ring-amber-500/15"
         aria-labelledby="needs-attention-heading"
       >
-        <div className="flex items-center justify-between gap-4 mb-6">
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_80%_60%_at_100%_0%,rgba(245,158,11,0.08),transparent_55%)]" />
+        <div className="relative flex items-center justify-between gap-4 pb-6">
           <h2 id="needs-attention-heading" className="text-lg font-semibold text-white">
             Needs attention
           </h2>
           <Link
             href="/dashboard/inbox"
-            className="text-xs font-medium text-amber-400/90 hover:text-amber-300 transition"
+            className="text-xs font-semibold text-amber-300/95 transition hover:text-amber-200"
           >
             View inbox →
           </Link>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full">
-          <div className="rounded-xl bg-black/20 border border-white/5 px-5 py-4">
-            <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">
+        <div className="relative grid w-full grid-cols-1 gap-4 md:grid-cols-2 md:gap-5">
+          <div className="rounded-xl border border-white/[0.08] bg-black/25 px-5 py-4 shadow-[0_0_0_1px_rgba(255,255,255,0.03)_inset]">
+            <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
               New replies
             </p>
-            <p className="text-3xl font-semibold tabular-nums text-white">
+            <p className="text-3xl font-semibold tabular-nums tracking-tight text-white">
               {newReplies ?? 0}
             </p>
-            <p className="text-xs text-zinc-500 mt-1">Inbound messages</p>
+            <p className="mt-1 text-xs text-zinc-500">Inbound messages</p>
           </div>
-          <div className="rounded-xl bg-black/20 border border-white/5 px-5 py-4">
-            <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">
+          <div className="rounded-xl border border-white/[0.08] bg-black/25 px-5 py-4 shadow-[0_0_0_1px_rgba(255,255,255,0.03)_inset]">
+            <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
               In pipeline
             </p>
-            <p className="text-3xl font-semibold tabular-nums text-white">
+            <p className="text-3xl font-semibold tabular-nums tracking-tight text-white">
               {pipelineLeads ?? 0}
             </p>
-            <p className="text-xs text-zinc-500 mt-1">Interested or call booked</p>
+            <p className="mt-1 text-xs text-zinc-500">Interested or call booked</p>
           </div>
         </div>
       </section>
 
       {/* Primary KPI row */}
-      <section className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full">
-        <div className="rounded-2xl p-6 bg-gradient-to-br from-blue-500/10 to-blue-900/10 border border-blue-500/20">
-          <p className="text-2xl font-semibold tabular-nums text-white">
+      <section className="grid w-full grid-cols-1 gap-4 md:grid-cols-3 md:gap-5">
+        <div className="group rounded-2xl border border-blue-500/25 bg-gradient-to-br from-blue-500/[0.12] via-blue-950/20 to-transparent p-6 transition duration-300 hover:-translate-y-0.5 hover:border-blue-400/35 hover:shadow-[0_20px_50px_-28px_rgba(59,130,246,0.45)] motion-reduce:transition-none motion-reduce:hover:translate-y-0">
+          <p className="text-2xl font-semibold tabular-nums tracking-tight text-white">
             {leadsFoundToday || 0}
           </p>
-          <p className="text-sm text-gray-400">Leads found today</p>
+          <p className="text-sm text-zinc-400">Leads found today</p>
         </div>
 
-        <div className="rounded-2xl p-6 bg-gradient-to-br from-green-500/10 to-green-900/10 border border-green-500/20">
-          <p className="text-2xl font-semibold tabular-nums text-white">
+        <div className="group rounded-2xl border border-emerald-500/25 bg-gradient-to-br from-emerald-500/[0.12] via-emerald-950/15 to-transparent p-6 transition duration-300 hover:-translate-y-0.5 hover:border-emerald-400/35 hover:shadow-[0_20px_50px_-28px_rgba(16,185,129,0.4)] motion-reduce:transition-none motion-reduce:hover:translate-y-0">
+          <p className="text-2xl font-semibold tabular-nums tracking-tight text-white">
             {activeCampaigns ?? 0}
           </p>
-          <p className="text-sm text-gray-400">Active campaigns</p>
+          <p className="text-sm text-zinc-400">Active campaigns</p>
         </div>
 
-        <div className="rounded-2xl p-6 bg-gradient-to-br from-yellow-500/10 to-yellow-900/10 border border-yellow-500/20">
-          <p className="text-2xl font-semibold tabular-nums text-white">
+        <div className="group rounded-2xl border border-amber-500/25 bg-gradient-to-br from-amber-500/[0.12] via-amber-950/15 to-transparent p-6 transition duration-300 hover:-translate-y-0.5 hover:border-amber-400/35 hover:shadow-[0_20px_50px_-28px_rgba(245,158,11,0.35)] motion-reduce:transition-none motion-reduce:hover:translate-y-0">
+          <p className="text-2xl font-semibold tabular-nums tracking-tight text-white">
             {meetingsBooked ?? 0}
           </p>
-          <p className="text-sm text-gray-400">Meetings booked</p>
+          <p className="text-sm text-zinc-400">Meetings booked</p>
         </div>
       </section>
 
-      <section className="grid grid-cols-1 lg:grid-cols-2 gap-6 w-full">
-        <div className="w-full rounded-2xl border border-white/10 p-6">
-          <div className="flex justify-between items-center mb-4">
+      <section className="grid w-full grid-cols-1 gap-5 lg:grid-cols-2">
+        <div className="bf-panel w-full rounded-2xl p-6">
+          <div className="mb-5 flex items-center justify-between gap-3">
             <h3 className="text-lg font-semibold text-white">Active Campaigns</h3>
-            <span className="text-xs text-gray-400">Live sending</span>
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-white/[0.04] px-2.5 py-1 text-[11px] font-medium uppercase tracking-wide text-zinc-400">
+              <span className="bf-live-dot size-1.5 rounded-full bg-emerald-400" />
+              Live sending
+            </span>
           </div>
 
-          <div className="space-y-4">
+          <div className="space-y-3">
             {(dashboardCampaigns ?? []).map((campaign) => {
               const isLive =
                 campaign.status === "active" || campaign.status === "sending"
               return (
                 <div
                   key={campaign.id}
-                  className="flex items-center justify-between gap-4 p-4 rounded-xl bg-white/5 border border-white/10"
+                  className="flex items-center justify-between gap-4 rounded-xl border border-white/[0.08] bg-black/20 p-4 transition hover:border-white/[0.12] hover:bg-white/[0.03]"
                 >
                   <div className="min-w-0">
-                    <p className="text-white font-medium truncate">{campaign.name}</p>
-                    <p className="text-xs text-gray-400">
+                    <p className="truncate font-medium text-white">{campaign.name}</p>
+                    <p className="text-xs text-zinc-500">
                       {campaign.sent_count ?? 0} sent • {campaign.leads_count ?? 0} leads
                     </p>
                   </div>
 
                   <div className="shrink-0">
                     {isLive ? (
-                      <span className="text-green-400 text-xs whitespace-nowrap">
-                        ● Sending
+                      <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs font-medium text-emerald-300">
+                        <span className="bf-live-dot size-1.5 rounded-full bg-emerald-400" />
+                        Sending
                       </span>
                     ) : (
-                      <span className="text-gray-400 text-xs whitespace-nowrap">
+                      <span className="whitespace-nowrap text-xs font-medium text-zinc-500">
                         Paused
                       </span>
                     )}
@@ -357,15 +364,15 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 overflow-hidden">
-          <div className="px-6 py-5 border-b border-zinc-800/80">
+        <div className="bf-panel overflow-hidden rounded-2xl">
+          <div className="border-b border-white/[0.06] px-6 py-5">
             <h2 className="text-base font-semibold text-white">Campaign pulse</h2>
-            <p className="text-xs text-zinc-500 mt-0.5">Volume today (all campaigns)</p>
+            <p className="mt-0.5 text-xs text-zinc-500">Volume today (all campaigns)</p>
           </div>
           <div className="px-6 py-5">
-            <div className="flex justify-between gap-4 text-sm">
+            <div className="flex items-center justify-between gap-4 text-sm">
               <span className="text-zinc-400">Emails sent today</span>
-              <span className="text-white font-medium tabular-nums">
+              <span className="font-semibold tabular-nums text-white">
                 {emailsSentToday ?? 0}
               </span>
             </div>
@@ -373,25 +380,25 @@ export default function DashboardPage() {
         </div>
       </section>
 
-      <section className="w-full rounded-2xl border border-zinc-800 bg-zinc-900/40 overflow-hidden">
-        <div className="px-6 py-5 border-b border-zinc-800/80 flex items-center justify-between gap-4">
+      <section className="bf-panel w-full overflow-hidden rounded-2xl">
+        <div className="flex items-center justify-between gap-4 border-b border-white/[0.06] px-6 py-5">
           <div>
             <h2 className="text-base font-semibold text-white">Today&apos;s tasks</h2>
-            <p className="text-xs text-zinc-500 mt-0.5">Outcome-first — do the next right thing</p>
+            <p className="mt-0.5 text-xs text-zinc-500">Outcome-first — do the next right thing</p>
           </div>
           <Link
             href="/dashboard/leads"
-            className="text-xs font-medium text-zinc-400 hover:text-white transition shrink-0"
+            className="shrink-0 text-xs font-semibold text-zinc-400 transition hover:text-white"
           >
             All leads →
           </Link>
         </div>
-        <ul className="divide-y divide-zinc-800/80">
+        <ul className="divide-y divide-white/[0.06]">
           {TODAYS_TASKS.map((task) => (
             <li key={task.title}>
               <Link
                 href="/dashboard/inbox"
-                className="flex items-start gap-4 px-6 py-4 hover:bg-zinc-800/30 transition flex-wrap sm:flex-nowrap"
+                className="flex flex-wrap items-start gap-4 px-6 py-4 transition hover:bg-white/[0.04] sm:flex-nowrap"
               >
                 <span
                   className={`shrink-0 rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${outcomeStyles[task.outcome]}`}

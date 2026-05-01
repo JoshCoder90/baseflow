@@ -17,6 +17,7 @@ export function GenerateSummaryButton({ leadId, onSuccess }: Props) {
       const res = await fetch("/api/generate-summary", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ leadId }),
       })
       const data = await res.json()

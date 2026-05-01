@@ -27,11 +27,24 @@ export function SummaryBlock({ leadId }: Props) {
         const res = await fetch("/api/generate-summary", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          credentials: "include",
           body: JSON.stringify({ leadId }),
         })
 
-        const json = await res.json()
+        const json = (await res.json()) as {
+          insights?: unknown
+          recommendedAction?: unknown
+          error?: string
+        }
         if (cancelled) return
+        if (!res.ok) {
+          setData({
+            recommendedAction:
+              typeof json.error === "string" ? json.error : "Could not load insights. Try again.",
+            insights: [],
+          })
+          return
+        }
         if (Array.isArray(json.insights)) {
           setData({
             recommendedAction:

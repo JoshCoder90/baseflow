@@ -56,7 +56,11 @@ export default async function DashboardCampaignLeadsPage({
         />
       </header>
 
-      <CampaignLeadsClient leads={leads} leadDetailBasePath="/dashboard/leads" />
+      <CampaignLeadsClient
+        leads={leads}
+        leadDetailBasePath="/dashboard/leads"
+        campaignId={campaignId}
+      />
     </div>
   )
 }

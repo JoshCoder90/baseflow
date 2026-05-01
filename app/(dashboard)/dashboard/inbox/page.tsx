@@ -120,6 +120,12 @@ function parseReplyOptions(raw: string): string[] {
     .filter(Boolean)
 }
 
+/** `/api/generate-reply` only accepts OpenAI-style roles — map CRM `messages.role`. */
+function crmRoleToChatRole(role: string | null | undefined): "user" | "assistant" {
+  const r = (role ?? "").toLowerCase()
+  return r === "inbound" || r === "lead" ? "user" : "assistant"
+}
+
 const AI_REPLY_FALLBACKS = [
   "Sounds great — when would be a good time to chat?",
   "Happy to help — want to hop on a quick call this week?",
@@ -142,12 +148,18 @@ async function requestPaddedAiReplies(threadMessages: Message[]): Promise<string
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       messages: threadMessages.map((m) => ({
-        role: m.role,
+        role: crmRoleToChatRole(m.role),
         content: emailBodyToPlainPreview(m.content ?? "") || "",
       })),
     }),
   })
   const data = (await res.json()) as { reply?: string; replies?: string[]; error?: string }
+  if (!res.ok) {
+    if (process.env.NODE_ENV === "development") {
+      console.warn("[dashboard_inbox] generate-reply failed:", data.error ?? res.status)
+    }
+    return padAiRepliesToThree([])
+  }
   const replies = Array.isArray(data.replies)
     ? data.replies.filter((s): s is string => typeof s === "string" && s.trim().length > 0)
     : parseReplyOptions(data.reply ?? "")
@@ -186,25 +198,6 @@ export default function InboxPage() {
       if (seq === aiRequestSeq.current) setLoadingAI(false)
     }
   }, [])
-
-  const generateAiSuggestions = useCallback(
-    async (threadId: string) => {
-      const { data, error } = await supabase
-        .from("messages")
-        .select("*")
-        .eq("thread_id", threadId)
-        .order("created_at", { ascending: true })
-
-      const threadMessages = (error ? [] : (data ?? [])) as Message[]
-      if (threadMessages.length === 0) {
-        setAiReplies([])
-        setLoadingAI(false)
-        return
-      }
-      await generateReplies(threadMessages)
-    },
-    [generateReplies]
-  )
 
   /** Sidebar + ordering: group paginated `messages` by `thread_id`; enrich with lead/campaign from DB only. */
   const loadThreads = useCallback(async () => {
@@ -560,8 +553,8 @@ export default function InboxPage() {
     }
   }
 
-  /** Active thread transcript — `messages` table only (no Gmail fetch). */
-  async function loadMessages(threadId: string) {
+  /** Active thread transcript — `messages` table only (no Gmail fetch). Returns rows shown in the pane. */
+  async function loadMessages(threadId: string): Promise<Message[]> {
     const { data, error } = await supabase
       .from("messages")
       .select("*")
@@ -571,7 +564,7 @@ export default function InboxPage() {
     if (error) {
       console.error("Messages load error:", error)
       setMessages([])
-      return
+      return []
     }
 
     const list = (data as Message[]) || []
@@ -592,17 +585,17 @@ export default function InboxPage() {
       for (const row of leadRows ?? []) {
         leadById.set(row.id as string, row as LeadEmbed)
       }
-      setMessages(
-        list.map((m) => {
-          if (resolveLeadEmbed(m) || !m.lead_id) return m
-          const L = leadById.get(m.lead_id)
-          return L ? { ...m, lead: L } : m
-        })
-      )
-      return
+      const enriched = list.map((m) => {
+        if (resolveLeadEmbed(m) || !m.lead_id) return m
+        const L = leadById.get(m.lead_id)
+        return L ? { ...m, lead: L } : m
+      })
+      setMessages(enriched)
+      return enriched
     }
 
     setMessages(list)
+    return list
   }
 
   async function sendReply() {
@@ -701,10 +694,13 @@ export default function InboxPage() {
 
       setReply("")
 
-      // ✅ FORCE UI UPDATE EVEN IF DB IS SLOW
-      setMessages((prev) => [...prev, data as Message])
+      const newMsg = data as Message
+      const nextMessages = messages.some((m) => m.id === newMsg.id)
+        ? messages
+        : [...messages, newMsg]
+      setMessages(nextMessages)
+      void generateReplies(nextMessages)
 
-      const newMsg = data as Message | undefined
       const lastActivityAt = newMsg?.created_at ?? new Date().toISOString()
       await recordOutboundConversation(selectedThread, lastActivityAt)
       const nowIso = new Date().toISOString()
@@ -770,17 +766,64 @@ export default function InboxPage() {
       setAiReplies([])
       return
     }
-    void loadMessages(selectedThread)
-  }, [selectedThread])
+    let cancelled = false
+    void (async () => {
+      const list = await loadMessages(selectedThread)
+      if (cancelled) return
+      if (list.length > 0) {
+        await generateReplies(list)
+      } else {
+        setAiReplies([])
+        setLoadingAI(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [selectedThread, generateReplies])
 
+  /** Gmail sync / other tabs insert rows — refresh transcript + suggestions for the open thread. */
   useEffect(() => {
     if (!selectedThread) return
-    void generateAiSuggestions(selectedThread)
-  }, [selectedThread, generateAiSuggestions])
+    let debounce: ReturnType<typeof setTimeout> | undefined
+    const ch = supabase
+      .channel(`dashboard-inbox-thread-${selectedThread}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "messages",
+          filter: `thread_id=eq.${selectedThread}`,
+        },
+        () => {
+          clearTimeout(debounce)
+          debounce = setTimeout(() => {
+            void (async () => {
+              const list = await loadMessages(selectedThread)
+              if (list.length > 0) await generateReplies(list)
+              else {
+                setAiReplies([])
+                setLoadingAI(false)
+              }
+            })()
+          }, 400)
+        }
+      )
+      .subscribe()
+
+    return () => {
+      clearTimeout(debounce)
+      void supabase.removeChannel(ch)
+    }
+  }, [selectedThread, generateReplies])
 
   function handleRegenerateAiReplies() {
     if (!selectedThread) return
-    void generateAiSuggestions(selectedThread)
+    void (async () => {
+      const list = await loadMessages(selectedThread)
+      if (list.length > 0) await generateReplies(list)
+    })()
   }
 
   const activeThread =

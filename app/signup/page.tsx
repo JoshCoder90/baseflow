@@ -32,13 +32,20 @@ export default function SignupPage() {
   }
 
   return (
-    <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto bg-gradient-to-b from-zinc-950 via-zinc-900 to-zinc-950 py-8 text-white">
-      <div className="bg-zinc-900 border border-zinc-700/50 p-8 rounded-xl w-full max-w-md space-y-4">
-        <h1 className="text-xl font-semibold">Sign up</h1>
+    <div className="relative isolate flex min-h-0 flex-1 items-center justify-center overflow-y-auto bg-[#030306] py-10 text-white">
+      <div className="bf-ambient" aria-hidden>
+        <div className="bf-ambient__orb bf-ambient__orb--a" />
+        <div className="bf-ambient__orb bf-ambient__orb--c" />
+        <div className="bf-ambient__vignette" />
+      </div>
+      <div className="bf-panel relative z-10 w-full max-w-md space-y-4 rounded-2xl p-8">
+        <h1 className="bg-gradient-to-br from-white to-zinc-400 bg-clip-text text-xl font-semibold text-transparent">
+          Sign up
+        </h1>
 
         <input
           type="email"
-          className="w-full p-2.5 rounded-lg border border-zinc-700 bg-zinc-800 text-white placeholder-zinc-500 focus:border-zinc-600 focus:outline-none focus:ring-1 focus:ring-zinc-600"
+          className="w-full rounded-xl border border-white/[0.1] bg-black/30 p-3 text-white outline-none transition placeholder:text-zinc-500 focus:border-blue-500/40 focus:ring-2 focus:ring-blue-500/20 disabled:opacity-60"
           placeholder="Email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
@@ -47,27 +54,30 @@ export default function SignupPage() {
 
         <input
           type="password"
-          className="w-full p-2.5 rounded-lg border border-zinc-700 bg-zinc-800 text-white placeholder-zinc-500 focus:border-zinc-600 focus:outline-none focus:ring-1 focus:ring-zinc-600"
+          className="w-full rounded-xl border border-white/[0.1] bg-black/30 p-3 text-white outline-none transition placeholder:text-zinc-500 focus:border-blue-500/40 focus:ring-2 focus:ring-blue-500/20 disabled:opacity-60"
           placeholder="Password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           disabled={loading}
         />
 
-        {error && <p className="text-red-400 text-sm">{error}</p>}
+        {error && <p className="text-sm text-red-400">{error}</p>}
 
         <button
           type="button"
           onClick={handleSignup}
           disabled={loading}
-          className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-70 disabled:cursor-not-allowed p-2.5 rounded-lg font-medium transition"
+          className="bf-btn-primary w-full rounded-xl p-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
         >
           {loading ? "Creating account..." : "Sign up"}
         </button>
 
-        <p className="text-sm text-zinc-500 text-center">
+        <p className="text-center text-sm text-zinc-500">
           Already have an account?{" "}
-          <Link href="/login" className="text-blue-400 hover:text-blue-300">
+          <Link
+            href="/login"
+            className="font-medium text-blue-300 transition hover:text-blue-200"
+          >
             Log in
           </Link>
         </p>

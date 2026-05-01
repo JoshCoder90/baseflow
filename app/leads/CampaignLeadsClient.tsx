@@ -1,7 +1,9 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import Link from "next/link"
+import { useRouter } from "next/navigation"
+import { supabase } from "@/lib/supabase"
 
 export type CampaignLeadRow = {
   id: string
@@ -55,11 +57,40 @@ function lastActivityAt(lead: CampaignLeadRow) {
 type Props = {
   leads: CampaignLeadRow[]
   leadDetailBasePath: string
+  /** When set, revalidate this page after an inbound `messages` row for any listed lead (Gmail sync). */
+  campaignId?: string | null
 }
 
-export function CampaignLeadsClient({ leads, leadDetailBasePath }: Props) {
+export function CampaignLeadsClient({ leads, leadDetailBasePath, campaignId }: Props) {
+  const router = useRouter()
   const [query, setQuery] = useState("")
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all")
+
+  useEffect(() => {
+    if (!campaignId?.trim()) return
+    const ids = new Set(leads.map((l) => l.id).filter(Boolean))
+    if (ids.size === 0) return
+
+    const ch = supabase
+      .channel(`campaign-leads-list-msgs-${campaignId}`)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "messages" },
+        (payload) => {
+          const row = payload.new as { lead_id?: string | null; role?: string | null }
+          const lid = row.lead_id
+          if (!lid || !ids.has(lid)) return
+          const role = (row.role ?? "").toLowerCase()
+          if (role !== "inbound" && role !== "lead") return
+          router.refresh()
+        }
+      )
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(ch)
+    }
+  }, [campaignId, leads, router])
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()

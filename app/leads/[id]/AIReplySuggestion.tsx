@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect, useCallback, useRef } from "react"
+import { emailBodyToPlainPreview } from "@/lib/email-body-display"
 
 type MessageRow = { role: string; content?: string | null }
 
@@ -37,7 +38,7 @@ export function AIReplySuggestion({ leadId, onInsertReply }: Props) {
 
       const mappedMessages = rows.map((m) => ({
         role: m.role === "inbound" || m.role === "lead" ? "user" : "assistant",
-        content: m.content ?? "",
+        content: emailBodyToPlainPreview(m.content ?? "") || "",
       }))
 
       const aiRes = await fetch("/api/generate-reply", {
@@ -45,7 +46,14 @@ export function AIReplySuggestion({ leadId, onInsertReply }: Props) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: mappedMessages }),
       })
-      const replyData = await aiRes.json()
+      const replyData = (await aiRes.json()) as { reply?: string; error?: string }
+      if (!aiRes.ok) {
+        if (process.env.NODE_ENV === "development") {
+          console.warn("[AIReplySuggestion] generate-reply:", replyData.error ?? aiRes.status)
+        }
+        if (req === suggestionsRequestId.current) setSuggestions([])
+        return
+      }
       const reply = replyData.reply ?? ""
       const opts = reply
         .split(/OPTION \d+:\s*/i)

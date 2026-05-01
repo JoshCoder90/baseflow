@@ -87,7 +87,7 @@ export default async function CampaignLeadsPage({
             />
           </header>
 
-          <CampaignLeadsClient leads={leads} leadDetailBasePath="/leads" />
+          <CampaignLeadsClient leads={leads} leadDetailBasePath="/leads" campaignId={campaignId} />
         </div>
       </main>
     </div>

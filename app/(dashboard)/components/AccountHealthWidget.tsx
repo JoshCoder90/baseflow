@@ -46,7 +46,7 @@ export function AccountHealthWidget({ data }: Props) {
     <>
       <div
         onClick={() => setShowHealthModal(true)}
-        className="rounded-xl bg-zinc-800/50 px-4 py-3 border border-zinc-700/30 cursor-pointer hover:bg-zinc-800/70 transition-colors"
+        className="bf-panel cursor-pointer rounded-xl px-4 py-3 transition hover:border-white/[0.12]"
       >
         <p className="text-xs font-medium text-zinc-500 uppercase tracking-wider mb-2">
           Account Health
@@ -57,21 +57,22 @@ export function AccountHealthWidget({ data }: Props) {
 
       {showHealthModal && (
         <div
-          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
           onClick={() => setShowHealthModal(false)}
         >
           <div
-            className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 w-[400px] max-w-[calc(100vw-2rem)]"
+            className="bf-panel w-full max-w-[400px] rounded-2xl p-6"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 className="text-lg font-semibold mb-4">Account Health</h2>
+            <h2 className="mb-4 text-lg font-semibold">Account Health</h2>
 
-            <p className="text-sm font-semibold text-white mb-1">{statusLabel}</p>
-            <p className="text-sm text-zinc-400 leading-relaxed">{description}</p>
+            <p className="mb-1 text-sm font-semibold text-white">{statusLabel}</p>
+            <p className="text-sm leading-relaxed text-zinc-400">{description}</p>
 
             <button
+              type="button"
               onClick={() => setShowHealthModal(false)}
-              className="mt-6 w-full bg-zinc-800 hover:bg-zinc-700 rounded-lg py-2 transition-colors"
+              className="mt-6 w-full rounded-lg border border-white/[0.1] bg-white/[0.06] py-2.5 text-sm font-medium transition hover:bg-white/[0.1]"
             >
               Close
             </button>

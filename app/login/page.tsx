@@ -29,16 +29,23 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto bg-[#0b0b0f] py-8 text-white">
-      <div className="w-full max-w-md p-6 rounded-xl border border-white/10 bg-white/5">
-        <h1 className="text-2xl font-semibold mb-6">Login</h1>
+    <div className="relative isolate flex min-h-0 flex-1 items-center justify-center overflow-y-auto bg-[#030306] py-10 text-white">
+      <div className="bf-ambient" aria-hidden>
+        <div className="bf-ambient__orb bf-ambient__orb--a" />
+        <div className="bf-ambient__orb bf-ambient__orb--b" />
+        <div className="bf-ambient__vignette" />
+      </div>
+      <div className="bf-panel relative z-10 w-full max-w-md rounded-2xl p-8">
+        <h1 className="mb-6 bg-gradient-to-br from-white to-zinc-400 bg-clip-text text-2xl font-semibold text-transparent">
+          Login
+        </h1>
 
         <input
           type="email"
           placeholder="Email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          className="w-full mb-3 p-3 rounded-lg bg-black/30 border border-white/10 outline-none"
+          className="mb-3 w-full rounded-xl border border-white/[0.1] bg-black/30 p-3.5 text-white outline-none ring-0 transition placeholder:text-zinc-500 focus:border-blue-500/40 focus:ring-2 focus:ring-blue-500/20"
         />
 
         <input
@@ -46,18 +53,18 @@ export default function LoginPage() {
           placeholder="Password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          className="w-full mb-4 p-3 rounded-lg bg-black/30 border border-white/10 outline-none"
+          className="mb-5 w-full rounded-xl border border-white/[0.1] bg-black/30 p-3.5 text-white outline-none transition placeholder:text-zinc-500 focus:border-blue-500/40 focus:ring-2 focus:ring-blue-500/20"
         />
 
         <button
           type="button"
           onClick={handleLogin}
-          className="w-full bg-blue-600 hover:bg-blue-700 transition rounded-lg p-3 font-medium"
+          className="bf-btn-primary w-full rounded-xl p-3.5 text-sm font-semibold text-white"
         >
           Login
         </button>
 
-        <p className="text-sm text-gray-400 mt-4 text-center">
+        <p className="mt-5 text-center text-sm text-zinc-500">
           Don&apos;t have an account? Sign up
         </p>
       </div>

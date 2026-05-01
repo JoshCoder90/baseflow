@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { supabase } from "@/lib/supabase"
 
 const STAGES = ["Lead", "Contacted", "Interested", "Call Booked", "Closed"] as const
@@ -26,27 +26,86 @@ function getStageClasses(index: number, activeIndex: number): string {
 export function DealPipeline({ leadId, initialStage }: Props) {
   const [stage, setStage] = useState<string>(initialStage ?? "Lead")
   const [isDetecting, setIsDetecting] = useState(false)
+  const detectDebounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
-  const runDetection = async () => {
+  const runDetection = useCallback(async () => {
     setIsDetecting(true)
     try {
       const res = await fetch("/api/detect-deal-stage", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ leadId }),
       })
-      const json = await res.json()
-      if (json.stage) setStage(json.stage)
+      const json = (await res.json()) as { stage?: string; error?: string }
+      if (!res.ok) {
+        if (process.env.NODE_ENV === "development") {
+          console.warn("[DealPipeline] detect-deal-stage:", json.error ?? res.status)
+        }
+        return
+      }
+      if (typeof json.stage === "string") setStage(json.stage)
     } catch (err) {
       console.error("Deal stage detection error:", err)
     } finally {
       setIsDetecting(false)
     }
-  }
+  }, [leadId])
+
+  const scheduleDetection = useCallback(() => {
+    if (detectDebounceRef.current) clearTimeout(detectDebounceRef.current)
+    detectDebounceRef.current = setTimeout(() => {
+      void runDetection()
+    }, 500)
+  }, [runDetection])
 
   useEffect(() => {
-    runDetection()
-  }, [leadId])
+    return () => {
+      if (detectDebounceRef.current) clearTimeout(detectDebounceRef.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    setStage(initialStage ?? "Lead")
+  }, [initialStage])
+
+  useEffect(() => {
+    void runDetection()
+  }, [runDetection])
+
+  useEffect(() => {
+    const onMessagesChanged = (e: Event) => {
+      const ce = e as CustomEvent<{ leadId?: string }>
+      if (ce.detail?.leadId !== leadId) return
+      scheduleDetection()
+    }
+    window.addEventListener("bf-lead-messages-changed", onMessagesChanged)
+    return () => {
+      window.removeEventListener("bf-lead-messages-changed", onMessagesChanged)
+    }
+  }, [leadId, scheduleDetection])
+
+  useEffect(() => {
+    const ch = supabase
+      .channel(`deal-pipeline-msgs-${leadId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "messages",
+          filter: `lead_id=eq.${leadId}`,
+        },
+        () => {
+          scheduleDetection()
+        }
+      )
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(ch)
+    }
+  }, [leadId, scheduleDetection])
 
   useEffect(() => {
     const channel = supabase
@@ -67,7 +126,7 @@ export function DealPipeline({ leadId, initialStage }: Props) {
       .subscribe()
 
     return () => {
-      supabase.removeChannel(channel)
+      void supabase.removeChannel(channel)
     }
   }, [leadId])
 

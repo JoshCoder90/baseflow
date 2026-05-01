@@ -6,19 +6,31 @@ type Props = {
   embedded?: boolean
   reply?: string
   setReply?: (value: string) => void
-  onSendReply?: (content: string) => void
+  onSendReply?: (content: string) => void | Promise<void>
+  /** When true, Send is disabled (e.g. Gmail send in progress). */
+  sending?: boolean
 }
 
-export function ReplyBox({ embedded, reply: replyProp, setReply: setReplyProp, onSendReply }: Props) {
+export function ReplyBox({
+  embedded,
+  reply: replyProp,
+  setReply: setReplyProp,
+  onSendReply,
+  sending = false,
+}: Props) {
   const [internalReply, setInternalReply] = useState("")
   const reply = replyProp !== undefined ? replyProp : internalReply
   const setReply = setReplyProp ?? setInternalReply
 
-  function handleSend() {
+  async function handleSend() {
     const text = reply.trim()
-    if (!text) return
-    onSendReply?.(text)
-    setReply("")
+    if (!text || sending) return
+    try {
+      await onSendReply?.(text)
+      setReply("")
+    } catch {
+      /* parent surfaced error */
+    }
   }
 
   const content = (
@@ -36,10 +48,11 @@ export function ReplyBox({ embedded, reply: replyProp, setReply: setReplyProp, o
         />
         <button
           type="button"
-          onClick={handleSend}
-          className="h-[36px] px-3 rounded-md bg-blue-600 hover:bg-blue-500 text-sm font-medium text-white transition shrink-0"
+          onClick={() => void handleSend()}
+          disabled={sending}
+          className="h-[36px] px-3 rounded-md bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:pointer-events-none text-sm font-medium text-white transition shrink-0"
         >
-          Send
+          {sending ? "Sending…" : "Send"}
         </button>
       </div>
     </>

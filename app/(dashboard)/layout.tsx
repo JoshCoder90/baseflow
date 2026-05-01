@@ -36,27 +36,34 @@ export default async function DashboardLayout({
   })
 
   return (
-    <div className="flex h-full min-h-0 overflow-hidden bg-gradient-to-b from-zinc-950 via-zinc-900 to-zinc-950 text-white">
-      <aside className="w-full lg:w-64 flex-shrink-0 bg-zinc-900/98 border-b lg:border-b-0 lg:border-r border-zinc-800/80 flex flex-row lg:flex-col">
-        <div className="p-4 lg:p-6 border-b-0 lg:border-b border-r lg:border-r-0 border-zinc-800/80 flex items-center lg:block">
-          <Link href="/" className="text-xl font-bold tracking-tight text-white hover:opacity-90">
+    <div className="relative isolate flex h-full min-h-0 overflow-hidden bg-[#030306] bg-[radial-gradient(ellipse_100%_70%_at_50%_-25%,rgba(59,130,246,0.12),transparent_52%),radial-gradient(ellipse_60%_45%_at_100%_50%,rgba(139,92,246,0.06),transparent_45%)] text-white">
+      <aside className="flex w-full flex-shrink-0 flex-row border-b border-white/[0.06] bg-zinc-950/85 backdrop-blur-2xl backdrop-saturate-150 lg:w-64 lg:flex-col lg:border-b-0 lg:border-r">
+        <div className="flex items-center border-r border-white/[0.06] p-4 lg:block lg:border-r-0 lg:border-b lg:border-white/[0.06] lg:p-6">
+          <Link
+            href="/"
+            className="bg-gradient-to-br from-white to-zinc-400 bg-clip-text text-xl font-bold tracking-tight text-transparent hover:opacity-90"
+          >
             BaseFlow
           </Link>
-          <p className="hidden lg:block text-xs text-zinc-500 mt-0.5 tracking-wide">Automation control</p>
+          <p className="mt-0.5 hidden text-xs tracking-wide text-zinc-500 lg:block">
+            Automation control
+          </p>
         </div>
         <SidebarNav />
-        <div className="hidden lg:flex p-4 space-y-2 border-t border-zinc-800 flex-col mt-auto">
-          <div className="rounded-xl bg-zinc-800/50 px-4 py-3 border border-zinc-700/30">
-            <p className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Plan</p>
-            <p className="text-sm font-semibold text-white mt-0.5">Growth</p>
+        <div className="mt-auto hidden flex-col space-y-2 border-t border-white/[0.06] p-4 lg:flex">
+          <div className="bf-panel rounded-xl px-4 py-3">
+            <p className="text-xs font-medium uppercase tracking-wider text-zinc-500">
+              Plan
+            </p>
+            <p className="mt-0.5 text-sm font-semibold text-white">Growth</p>
           </div>
           <AccountHealthWidget data={accountHealth} />
         </div>
       </aside>
 
-      <div className="flex min-h-0 flex-1 flex-col min-w-0 overflow-hidden">
-        <main className="flex min-h-0 flex-1 flex-col overflow-hidden px-8 py-8">
-          <div className="flex min-h-0 w-full flex-1 flex-col overflow-y-auto overflow-x-hidden">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <main className="flex min-h-0 flex-1 flex-col overflow-hidden px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
+          <div className="flex min-h-0 w-full flex-1 flex-col overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable]">
             {children}
           </div>
         </main>

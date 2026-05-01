@@ -13,6 +13,10 @@ import { ScrapingProgressBar } from "./ScrapingProgressBar"
 import { MAX_LEADS_PER_CAMPAIGN } from "@/lib/campaign-leads-insert"
 import type { CampaignQueueStats } from "@/lib/get-campaign-stats"
 import { getCampaignStats } from "@/lib/get-campaign-stats"
+import {
+  applyInboundReplyToLeadStatus,
+  fetchLeadIdsWithInboundMessages,
+} from "@/lib/lead-inbound-reply-status"
 
 /** Polling for live `campaigns` row — `/api/get-campaign` (2s, stops when `completed`). Full leads/queue: Supabase in `fetchCampaignData` + Realtime. */
 const CAMPAIGN_STATUS_POLL_MS = 2000
@@ -179,8 +183,18 @@ async function loadLeadsAndQueueFromClient(
   const leadsTotalCount = rows.length
   const notSent = Math.max(0, leadsTotalCount - queueStatsFromDb.sent)
 
+  const leadIdsForInbound = rows.map((r) => String(r.id ?? "")).filter(Boolean)
+  const inboundLeadIds = await fetchLeadIdsWithInboundMessages(supabase, leadIdsForInbound)
+  const rowsWithReplyStatus = rows.map((raw) => {
+    const id = String(raw.id ?? "")
+    const cur = (raw.status as string | null) ?? null
+    const merged = applyInboundReplyToLeadStatus({ id, status: cur }, inboundLeadIds)
+    if (merged.status === cur) return raw
+    return { ...raw, status: merged.status }
+  })
+
   return {
-    leads: rows.map((raw) => normalizeLead(raw)),
+    leads: rowsWithReplyStatus.map((raw) => normalizeLead(raw)),
     queueMessages,
     queueStats: { ...queueStatsFromDb, notSent },
   }
@@ -275,6 +289,8 @@ export function CampaignDetailContent({
   const activeCampaignIdRef = useRef(campaignId)
   activeCampaignIdRef.current = campaignId
   const initialFetchCompletedRef = useRef(false)
+  /** For `messages` Realtime: refetch campaign leads when an inbound row lands for any lead on this campaign. */
+  const leadIdsForRealtimeRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     setLiveCampaign({
@@ -283,6 +299,12 @@ export function CampaignDetailContent({
         typeof initialCampaign.leads_found === "number" ? initialCampaign.leads_found : null,
     })
   }, [campaignId, initialCampaign.status, initialCampaign.leads_found])
+
+  useEffect(() => {
+    leadIdsForRealtimeRef.current = new Set(
+      leadsForThisCampaign.map((l) => l.id).filter((id) => id.length > 0)
+    )
+  }, [leadsForThisCampaign])
 
   useEffect(() => {
     if (startSendingUi !== "awaiting_active") return
@@ -495,6 +517,31 @@ export function CampaignDetailContent({
       if (ch2) void supabase.removeChannel(ch2)
     }
   }, [campaignId, campaign.audience_id])
+
+  /** Gmail sync inserts inbound `messages` without updating `leads.status` — refetch so Leads tab matches inbox. */
+  useEffect(() => {
+    if (!campaignId) return
+
+    const ch = supabase
+      .channel(`campaign-inbound-messages-${campaignId}`)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "messages" },
+        (payload) => {
+          const row = payload.new as { lead_id?: string | null; role?: string | null }
+          const lid = row.lead_id
+          if (!lid || !leadIdsForRealtimeRef.current.has(lid)) return
+          const role = (row.role ?? "").toLowerCase()
+          if (role !== "inbound" && role !== "lead") return
+          void fetchCampaignDataRef.current()
+        }
+      )
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(ch)
+    }
+  }, [campaignId])
 
   /** Realtime: mirror status/stage locally; one refetch when lead gen finishes (no per-tick spam). */
   useEffect(() => {

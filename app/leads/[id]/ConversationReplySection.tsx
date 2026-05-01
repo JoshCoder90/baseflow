@@ -2,15 +2,19 @@
 
 import { useState, useEffect, useRef, useCallback } from "react"
 import { supabase } from "@/lib/supabase"
+import { GMAIL_RECONNECT_REQUIRED } from "@/lib/gmail-reconnect-client"
+import { recordOutboundConversationRow } from "@/lib/record-outbound-conversation"
 import { ConversationTimeline } from "./ConversationTimeline"
 import { ReplyBox } from "./ReplyBox"
 import { AIReplySuggestion } from "./AIReplySuggestion"
 
 type Message = {
   id: string
-  role: "outbound" | "inbound"
+  role: "outbound" | "inbound" | string
   content?: string | null
   created_at?: string | null
+  thread_id?: string | null
+  campaign_id?: string | null
 }
 
 export function ConversationReplySection({
@@ -22,6 +26,7 @@ export function ConversationReplySection({
 }) {
   const [messages, setMessages] = useState<Message[]>([])
   const [reply, setReply] = useState("")
+  const [sending, setSending] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
 
@@ -110,28 +115,109 @@ export function ConversationReplySection({
     const text = content.trim()
     if (!text) return
 
-    const { data, error } = await supabase
-      .from("messages")
-      .insert({
-        lead_id: leadId,
-        campaign_id: campaignId ?? null,
-        role: "outbound",
-        content: text,
-      })
-      .select("*")
-      .single()
+    const threadId =
+      [...messages].reverse().find((m) => m.thread_id?.trim())?.thread_id?.trim() ?? ""
 
-    if (error) {
-      console.error("Insert error:", error)
-      return
+    if (!threadId) {
+      window.alert(
+        "No Gmail thread is linked to this conversation yet. Wait for the first campaign email to send (or open Inbox after Gmail sync), then try again."
+      )
+      throw new Error("no-thread")
     }
-    if (data) {
+
+    const { data: leadRow, error: leadErr } = await supabase
+      .from("leads")
+      .select("email")
+      .eq("id", leadId)
+      .maybeSingle()
+
+    if (leadErr || !leadRow?.email?.trim()) {
+      window.alert(
+        !leadRow?.email?.trim()
+          ? "This contact has no email address. Add an email on the lead to send."
+          : "Could not load this lead. Try refreshing the page."
+      )
+      throw new Error("no-email")
+    }
+    const toEmail = leadRow.email.trim()
+
+    setSending(true)
+    try {
+      const sendRes = await fetch("/api/send-reply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          to: toEmail,
+          subject: "Re:",
+          message: text,
+          threadId,
+        }),
+      })
+      const sendPayload = (await sendRes.json().catch(() => ({}))) as {
+        error?: string
+        success?: boolean
+      }
+
+      if (!sendRes.ok) {
+        const errMsg = sendPayload.error ?? "Failed to send email"
+        if (
+          errMsg === GMAIL_RECONNECT_REQUIRED ||
+          errMsg.includes(GMAIL_RECONNECT_REQUIRED)
+        ) {
+          window.alert(
+            "Gmail needs to be reconnected. Open Connections and reconnect your account."
+          )
+        } else {
+          window.alert(errMsg)
+        }
+        throw new Error("send-failed")
+      }
+
+      const campaignForInsert =
+        campaignId ??
+        (messages.find((m) => m.campaign_id)?.campaign_id as string | null | undefined) ??
+        null
+
+      const { data, error } = await supabase
+        .from("messages")
+        .insert({
+          lead_id: leadId,
+          campaign_id: campaignForInsert,
+          role: "outbound",
+          content: text,
+          thread_id: threadId,
+        })
+        .select("*")
+        .single()
+
+      if (error) {
+        console.error("[ConversationReplySection] messages insert after Gmail send:", error)
+        window.alert(
+          "Your message was sent via Gmail but could not be saved to this timeline. Check your Sent mail and Inbox; it may appear after the next sync."
+        )
+        throw new Error("insert-failed")
+      }
+
       const newMessage = data as Message
       setMessages((prev) => {
         if (prev.some((m) => m.id === newMessage.id)) return prev
         return [...prev, newMessage]
       })
-      setReply("")
+
+      const lastActivityAt = newMessage.created_at ?? new Date().toISOString()
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+      if (user) {
+        await recordOutboundConversationRow(supabase, {
+          userId: user.id,
+          threadId,
+          lastActivityAt,
+        })
+      }
+    } finally {
+      setSending(false)
     }
   }
 
@@ -160,7 +246,13 @@ export function ConversationReplySection({
               <ConversationTimeline messages={messages} embedded messagesEndRef={messagesEndRef} />
             </div>
             <div className="shrink-0 border-t border-zinc-800 bg-zinc-900/40 p-3">
-              <ReplyBox embedded reply={reply} setReply={setReply} onSendReply={handleSendReply} />
+              <ReplyBox
+                embedded
+                reply={reply}
+                setReply={setReply}
+                onSendReply={handleSendReply}
+                sending={sending}
+              />
             </div>
           </div>
         </div>

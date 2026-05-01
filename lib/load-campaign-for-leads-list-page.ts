@@ -1,4 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js"
+import {
+  applyInboundReplyToLeadStatus,
+  fetchLeadIdsWithInboundMessages,
+} from "@/lib/lead-inbound-reply-status"
 
 const PAGE_DEBUG = "campaign_leads_list"
 
@@ -85,7 +89,7 @@ export async function loadLeadsRowsForCampaignList(
     return []
   }
 
-  return (data ?? []) as {
+  const rows = (data ?? []) as {
     id: string
     name: string | null
     email: string | null
@@ -93,4 +97,11 @@ export async function loadLeadsRowsForCampaignList(
     last_message_sent_at: string | null
     created_at: string | null
   }[]
+
+  const inboundLeadIds = await fetchLeadIdsWithInboundMessages(
+    supabase,
+    rows.map((r) => r.id)
+  )
+
+  return rows.map((row) => applyInboundReplyToLeadStatus(row, inboundLeadIds))
 }

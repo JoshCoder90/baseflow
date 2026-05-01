@@ -6,9 +6,12 @@ import { useEffect, useState } from "react"
 import { Plug } from "lucide-react"
 import { supabase } from "@/lib/supabase"
 
-const navBase = "flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-medium whitespace-nowrap transition"
-const navInactive = "text-zinc-400 hover:text-white hover:bg-zinc-800/60"
-const navActive = "bg-zinc-800/80 text-white border border-zinc-700/50"
+const navBase =
+  "flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-medium whitespace-nowrap transition duration-200"
+const navInactive =
+  "text-zinc-400 hover:bg-white/[0.05] hover:text-white"
+const navActive =
+  "bg-white/[0.08] text-white shadow-[0_0_0_1px_rgba(255,255,255,0.08)_inset,0_12px_40px_-24px_rgba(0,0,0,0.5)] ring-1 ring-white/10"
 
 /** Unread = latest inbound time is newer than last_read_at (outbound does not affect this). */
 function unreadInboundCount(
@@ -159,7 +162,7 @@ export function SidebarNav() {
             Inbox
           </span>
           {unreadCount > 0 && (
-            <div className="ml-2 shrink-0 rounded-full bg-blue-500 px-2 py-0.5 text-xs text-white">
+            <div className="ml-2 shrink-0 rounded-full bg-gradient-to-b from-blue-400 to-blue-600 px-2 py-0.5 text-xs font-semibold text-white shadow-[0_0_16px_-2px_rgba(59,130,246,0.65)]">
               {unreadCount}
             </div>
           )}
@@ -176,7 +179,7 @@ export function SidebarNav() {
         type="button"
         onClick={async () => {
           await supabase.auth.signOut()
-          window.location.href = "/login"
+          window.location.href = "/"
         }}
         className={`${navBase} ${navInactive} mt-auto`}
       >
