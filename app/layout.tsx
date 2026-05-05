@@ -29,7 +29,7 @@ export default function RootLayout({
     <html lang="en" className="h-full">
       <body
         suppressHydrationWarning
-        className={`${geistSans.variable} ${geistMono.variable} font-sans flex h-full flex-col overflow-hidden bg-[#030306] antialiased`}
+        className={`${geistSans.variable} ${geistMono.variable} font-sans flex h-full flex-col overflow-hidden bg-[#0a1428] antialiased`}
       >
         <SessionProvider>
           <GmailReconnectProvider>

@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 :root {
-  --background: #030306;
+  --background: #0a1428;
   --foreground: #f4f4f5;
   --bf-accent: #3b82f6;
   --bf-accent-glow: rgba(59, 130, 246, 0.45);
@@ -20,7 +20,7 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #030306;
+    --background: #0a1428;
     --foreground: #f4f4f5;
   }
 }
@@ -80,15 +80,19 @@ body {
   0%,
   100% {
     transform: translate(0, 0) scale(1);
-    opacity: 0.55;
+    opacity: 0.52;
   }
-  33% {
-    transform: translate(8%, 12%) scale(1.08);
-    opacity: 0.75;
+  25% {
+    transform: translate(18%, 14%) scale(1.16);
+    opacity: 0.82;
   }
-  66% {
-    transform: translate(-6%, 6%) scale(0.95);
-    opacity: 0.5;
+  50% {
+    transform: translate(-12%, 20%) scale(0.88);
+    opacity: 0.48;
+  }
+  75% {
+    transform: translate(10%, -12%) scale(1.1);
+    opacity: 0.74;
   }
 }
 
@@ -96,15 +100,19 @@ body {
   0%,
   100% {
     transform: translate(0, 0) scale(1);
-    opacity: 0.45;
+    opacity: 0.44;
   }
-  40% {
-    transform: translate(-10%, -8%) scale(1.12);
+  30% {
+    transform: translate(-16%, -12%) scale(1.14);
+    opacity: 0.72;
+  }
+  55% {
+    transform: translate(8%, -20%) scale(0.9);
+    opacity: 0.42;
+  }
+  80% {
+    transform: translate(14%, 10%) scale(1.08);
     opacity: 0.65;
-  }
-  70% {
-    transform: translate(5%, -14%) scale(0.92);
-    opacity: 0.4;
   }
 }
 
@@ -112,11 +120,159 @@ body {
   0%,
   100% {
     transform: translate(0, 0) scale(1);
-    opacity: 0.35;
+    opacity: 0.38;
   }
-  50% {
-    transform: translate(-12%, 10%) scale(1.05);
+  35% {
+    transform: translate(-18%, 14%) scale(1.12);
+    opacity: 0.62;
+  }
+  65% {
+    transform: translate(14%, -8%) scale(0.92);
+    opacity: 0.4;
+  }
+}
+
+@keyframes bfOrb4 {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+    opacity: 0.4;
+  }
+  28% {
+    transform: translate(20%, -10%) scale(1.12);
+    opacity: 0.68;
+  }
+  58% {
+    transform: translate(-8%, 16%) scale(0.9);
+    opacity: 0.38;
+  }
+  85% {
+    transform: translate(-14%, -6%) scale(1.06);
+    opacity: 0.58;
+  }
+}
+
+@keyframes bfOrb5 {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+    opacity: 0.4;
+  }
+  32% {
+    transform: translate(-14%, 12%) scale(1.1);
+    opacity: 0.64;
+  }
+  62% {
+    transform: translate(16%, -14%) scale(0.92);
+    opacity: 0.36;
+  }
+  88% {
+    transform: translate(-6%, -8%) scale(1.08);
     opacity: 0.55;
+  }
+}
+
+/*
+ * Blob float — linear timing = steady visible drift (ease-in-out feels “stuck” between stops).
+ * Large vw/vh so motion reads through blur. No rotate.
+ */
+@keyframes bfAtmosphereDriftA {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  33% {
+    transform: translate(12vw, -7vh) scale(1.07);
+  }
+  66% {
+    transform: translate(-7vw, 11vh) scale(1.04);
+  }
+}
+
+@keyframes bfAtmosphereDriftB {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1.02);
+  }
+  40% {
+    transform: translate(-11vw, 8vh) scale(1.09);
+  }
+  75% {
+    transform: translate(9vw, -7vh) scale(1.05);
+  }
+}
+
+@keyframes bfAtmosphereDriftC {
+  0%,
+  100% {
+    transform: translate(-50%, -50%) translate(-8vw, 5vh);
+    opacity: 0.76;
+  }
+  33% {
+    transform: translate(-50%, -50%) translate(10vw, -8vh);
+    opacity: 0.88;
+  }
+  66% {
+    transform: translate(-50%, -50%) translate(-4vw, 11vh);
+    opacity: 0.8;
+  }
+}
+
+@keyframes bfBlobFloat1 {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  25% {
+    transform: translate(9vw, 7vh) scale(1.07);
+  }
+  55% {
+    transform: translate(-6vw, -9vh) scale(1.04);
+  }
+  80% {
+    transform: translate(8vw, -4vh) scale(1.09);
+  }
+}
+
+@keyframes bfBlobFloat2 {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1.02);
+  }
+  30% {
+    transform: translate(-12vw, -8vh) scale(1.1);
+  }
+  60% {
+    transform: translate(7vw, 11vh) scale(1.05);
+  }
+  85% {
+    transform: translate(-8vw, 5vh) scale(1.08);
+  }
+}
+
+@keyframes bfBlobFloat3 {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  35% {
+    transform: translate(11vw, -9vh) scale(1.08);
+  }
+  70% {
+    transform: translate(-9vw, 7vh) scale(1.05);
+  }
+}
+
+@keyframes bfBlobFloat4 {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1.03);
+  }
+  40% {
+    transform: translate(-9vw, 11vh) scale(1.07);
+  }
+  70% {
+    transform: translate(10vw, -6vh) scale(1.1);
   }
 }
 
@@ -167,48 +323,263 @@ body {
 }
 
 .bf-ambient__orb--a {
-  width: min(72vw, 520px);
-  height: min(72vw, 520px);
-  left: -18%;
-  top: -12%;
+  width: min(85vw, 620px);
+  height: min(85vw, 620px);
+  left: -22%;
+  top: -14%;
   background: radial-gradient(
     circle at 30% 30%,
-    rgba(59, 130, 246, 0.35),
-    transparent 62%
+    rgba(59, 130, 246, 0.42),
+    transparent 58%
   );
-  animation: bfOrb1 22s ease-in-out infinite;
+  animation: bfOrb1 24s ease-in-out infinite;
 }
 
 .bf-ambient__orb--b {
-  width: min(65vw, 480px);
-  height: min(65vw, 480px);
-  right: -14%;
-  top: 8%;
+  width: min(78vw, 560px);
+  height: min(78vw, 560px);
+  right: -18%;
+  top: 4%;
   background: radial-gradient(
     circle at 50% 40%,
-    rgba(139, 92, 246, 0.28),
-    transparent 58%
+    rgba(37, 99, 235, 0.44),
+    transparent 52%
   );
-  animation: bfOrb2 26s ease-in-out infinite;
+  animation: bfOrb2 27s ease-in-out infinite;
 }
 
 .bf-ambient__orb--c {
-  width: min(80vw, 560px);
-  height: min(80vw, 560px);
-  left: 20%;
-  bottom: -25%;
+  width: min(92vw, 640px);
+  height: min(92vw, 640px);
+  left: 14%;
+  bottom: -28%;
   background: radial-gradient(
     circle at 50% 50%,
-    rgba(6, 182, 212, 0.18),
-    transparent 55%
+    rgba(56, 189, 248, 0.24),
+    transparent 50%
   );
   animation: bfOrb3 30s ease-in-out infinite;
+}
+
+/* Extra edge masses — constant CSS motion, no input */
+.bf-ambient__orb--d {
+  width: min(70vw, 520px);
+  height: min(95vh, 520px);
+  left: -24%;
+  top: 18%;
+  background: radial-gradient(
+    circle at 65% 45%,
+    rgba(30, 64, 175, 0.36),
+    transparent 54%
+  );
+  animation: bfOrb4 26s ease-in-out infinite;
+}
+
+.bf-ambient__orb--e {
+  width: min(72vw, 540px);
+  height: min(90vh, 500px);
+  right: -22%;
+  bottom: -8%;
+  background: radial-gradient(
+    circle at 35% 55%,
+    rgba(147, 197, 253, 0.26),
+    transparent 52%
+  );
+  animation: bfOrb5 28s ease-in-out infinite -3s;
+}
+
+/* Static base — soft circular pools (no stretched ellipses / diagonal beams) */
+.bf-landing-base {
+  background:
+    radial-gradient(circle min(58vw, 720px) at 22% 28%, rgba(79, 140, 255, 0.28) 0%, transparent 62%),
+    radial-gradient(circle min(52vw, 640px) at 82% 72%, rgba(56, 189, 248, 0.18) 0%, transparent 58%),
+    radial-gradient(circle min(48vw, 560px) at 48% 92%, rgba(37, 99, 235, 0.14) 0%, transparent 55%),
+    #0a1428;
+}
+
+/* Landing atmosphere — giant round glow masses */
+.bf-landing-atmosphere {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.bf-landing-glow {
+  position: absolute;
+  will-change: transform;
+  mix-blend-mode: screen;
+}
+
+.bf-landing-glow-inner {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.bf-landing-glow--nw {
+  width: min(78vmin, 820px);
+  height: min(78vmin, 820px);
+  left: -22%;
+  top: -18%;
+  opacity: 1;
+  animation: bfAtmosphereDriftA 11s linear infinite;
+}
+
+.bf-landing-glow--nw .bf-landing-glow-inner {
+  background: radial-gradient(
+    circle at 42% 38%,
+    rgba(147, 197, 253, 0.72) 0%,
+    rgba(59, 130, 246, 0.42) 42%,
+    rgba(37, 99, 235, 0.18) 58%,
+    transparent 74%
+  );
+  filter: blur(108px) saturate(1.32);
+}
+
+.bf-landing-glow--se {
+  width: min(74vmin, 760px);
+  height: min(74vmin, 760px);
+  right: -26%;
+  bottom: -16%;
+  opacity: 0.96;
+  animation: bfAtmosphereDriftB 12s linear infinite -4s;
+}
+
+.bf-landing-glow--se .bf-landing-glow-inner {
+  background: radial-gradient(
+    circle at 58% 58%,
+    rgba(56, 189, 248, 0.58) 0%,
+    rgba(14, 165, 233, 0.36) 44%,
+    rgba(29, 78, 216, 0.14) 58%,
+    transparent 76%
+  );
+  filter: blur(112px) saturate(1.28);
+}
+
+.bf-landing-glow--mid {
+  width: min(88vmin, 780px);
+  height: min(88vmin, 780px);
+  left: 50%;
+  top: 38%;
+  transform: translate(-50%, -50%);
+  opacity: 0.82;
+  animation: bfAtmosphereDriftC 10s linear infinite -2s;
+}
+
+.bf-landing-glow--mid .bf-landing-glow-inner {
+  background: radial-gradient(
+    circle at 48% 46%,
+    rgba(224, 242, 254, 0.4) 0%,
+    rgba(96, 165, 250, 0.28) 44%,
+    rgba(37, 99, 235, 0.09) 58%,
+    transparent 76%
+  );
+  filter: blur(100px) saturate(1.26);
+}
+
+/* Extra depth — second layer of giant blurred circles */
+.bf-landing-fluid {
+  position: absolute;
+  inset: -18%;
+  pointer-events: none;
+}
+
+.bf-landing-blob {
+  position: absolute;
+  mix-blend-mode: screen;
+  will-change: transform;
+}
+
+.bf-landing-blob-inner {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.bf-landing-blob--1 {
+  width: min(95vmin, 1020px);
+  height: min(95vmin, 1020px);
+  left: -36%;
+  top: -24%;
+  opacity: 0.78;
+  animation: bfBlobFloat1 12s linear infinite;
+}
+
+.bf-landing-blob--1 .bf-landing-blob-inner {
+  background: radial-gradient(
+    circle at 44% 40%,
+    rgba(165, 210, 255, 0.58) 0%,
+    rgba(59, 130, 246, 0.34) 46%,
+    rgba(29, 78, 216, 0.1) 64%,
+    transparent 78%
+  );
+  filter: blur(124px) saturate(1.26);
+}
+
+.bf-landing-blob--2 {
+  width: min(88vmin, 920px);
+  height: min(88vmin, 920px);
+  right: -40%;
+  bottom: -30%;
+  opacity: 0.72;
+  animation: bfBlobFloat2 14s linear infinite -5s;
+}
+
+.bf-landing-blob--2 .bf-landing-blob-inner {
+  background: radial-gradient(
+    circle at 54% 54%,
+    rgba(34, 211, 238, 0.38) 0%,
+    rgba(37, 99, 235, 0.32) 48%,
+    rgba(30, 58, 138, 0.1) 68%,
+    transparent 82%
+  );
+  filter: blur(132px) saturate(1.28);
+}
+
+.bf-landing-blob--3 {
+  width: min(72vmin, 720px);
+  height: min(72vmin, 720px);
+  left: 8%;
+  top: 42%;
+  opacity: 0.64;
+  animation: bfBlobFloat3 11s linear infinite -3s;
+}
+
+.bf-landing-blob--3 .bf-landing-blob-inner {
+  background: radial-gradient(
+    circle at 48% 48%,
+    rgba(125, 211, 252, 0.4) 0%,
+    rgba(59, 130, 246, 0.2) 50%,
+    transparent 72%
+  );
+  filter: blur(118px) saturate(1.22);
+}
+
+.bf-landing-blob--4 {
+  width: min(68vmin, 600px);
+  height: min(68vmin, 600px);
+  right: 6%;
+  top: 10%;
+  opacity: 0.58;
+  animation: bfBlobFloat4 9s linear infinite -2s;
+}
+
+.bf-landing-blob--4 .bf-landing-blob-inner {
+  background: radial-gradient(
+    circle at 44% 44%,
+    rgba(224, 242, 254, 0.42) 0%,
+    rgba(59, 130, 246, 0.26) 46%,
+    transparent 72%
+  );
+  filter: blur(112px) saturate(1.24);
 }
 
 .bf-ambient__grid {
   position: absolute;
   inset: -40%;
-  opacity: 0.045;
+  opacity: 0.058;
   background-image:
     linear-gradient(rgba(255, 255, 255, 0.5) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.5) 1px, transparent 1px);
@@ -229,6 +600,15 @@ body {
     ellipse 85% 70% at 50% 0%,
     transparent 0%,
     rgba(0, 0, 0, 0.55) 100%
+  );
+}
+
+/* Landing: let colour breathe — lighter falloff than app chrome */
+.bf-ambient__vignette.bf-landing-vignette--light {
+  background: radial-gradient(
+    ellipse 98% 85% at 50% -4%,
+    transparent 0%,
+    rgba(2, 6, 18, 0.38) 100%
   );
 }
 
@@ -285,11 +665,11 @@ body {
 }
 
 .bf-btn-primary {
-  background: linear-gradient(180deg, #4f8fff 0%, #2563eb 100%);
+  background: linear-gradient(180deg, #4586f5 0%, #1d4ed8 100%);
   box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.12) inset,
-    0 1px 0 rgba(255, 255, 255, 0.18) inset,
-    0 12px 40px -8px var(--bf-accent-glow);
+    0 0 0 1px rgba(255, 255, 255, 0.1) inset,
+    0 1px 0 rgba(255, 255, 255, 0.14) inset,
+    0 8px 28px -10px rgba(59, 130, 246, 0.32);
   transition:
     transform 0.2s ease,
     box-shadow 0.2s ease,
@@ -297,11 +677,11 @@ body {
 }
 
 .bf-btn-primary:hover {
-  filter: brightness(1.06);
+  filter: brightness(1.05);
   box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.16) inset,
-    0 1px 0 rgba(255, 255, 255, 0.22) inset,
-    0 16px 48px -6px var(--bf-accent-glow);
+    0 0 0 1px rgba(255, 255, 255, 0.14) inset,
+    0 1px 0 rgba(255, 255, 255, 0.18) inset,
+    0 12px 36px -8px rgba(59, 130, 246, 0.38);
 }
 
 .bf-btn-primary:active {
@@ -312,15 +692,6 @@ body {
   animation: bfPulseSoft 2.2s ease-in-out infinite;
 }
 
-@keyframes bfAuroraRotate {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 @keyframes bfNoiseShift {
   0% {
     transform: translate(0, 0);
@@ -329,41 +700,132 @@ body {
     transform: translate(-2.5%, 2%);
   }
   100% {
-    transform: translate(1.5%, -1.5%);
+    transform: translate(1.8%, -1.5%);
   }
-}
-
-/* Landing hero: slow iridescent wash (Ulio-style depth without WebGL) */
-.bf-landing-aurora {
-  position: absolute;
-  inset: -48%;
-  background: conic-gradient(
-    from 210deg at 48% 42%,
-    rgba(59, 130, 246, 0.14),
-    transparent 25%,
-    rgba(139, 92, 246, 0.11),
-    transparent 52%,
-    rgba(6, 182, 212, 0.09),
-    transparent 78%,
-    rgba(59, 130, 246, 0.12),
-    transparent 100%
-  );
-  filter: blur(52px);
-  animation: bfAuroraRotate 78s linear infinite;
-  will-change: transform;
 }
 
 .bf-landing-noise {
   position: absolute;
   inset: 0;
-  opacity: 0.038;
-  mix-blend-mode: overlay;
-  background-image: radial-gradient(
-    rgba(255, 255, 255, 0.11) 0.55px,
-    transparent 0.6px
-  );
-  background-size: 3.5px 3.5px;
-  animation: bfNoiseShift 22s ease-in-out infinite;
+  opacity: 0.11;
+  mix-blend-mode: soft-light;
+  background-image:
+    radial-gradient(rgba(220, 235, 255, 0.12) 0.55px, transparent 0.65px),
+    radial-gradient(rgba(255, 255, 255, 0.06) 0.45px, transparent 0.55px),
+    radial-gradient(rgba(180, 210, 255, 0.08) 1px, transparent 1.15px);
+  background-size:
+    3.5px 3.5px,
+    2.4px 2.4px,
+    5.5px 5.5px;
+  animation: bfNoiseShift 14s ease-in-out infinite;
+}
+
+/* —— Landing marketing: Ulio-style pop-in + section reveals —— */
+
+@keyframes landingHeroPop {
+  from {
+    opacity: 0;
+    transform: translateY(20px) scale(0.992);
+    filter: blur(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+.landing-hero-in {
+  opacity: 0;
+  animation: landingHeroPop 0.88s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.landing-hero-d0 {
+  animation-delay: 0s;
+}
+.landing-hero-d1 {
+  animation-delay: 0.09s;
+}
+.landing-hero-d2 {
+  animation-delay: 0.18s;
+}
+.landing-hero-d3 {
+  animation-delay: 0.27s;
+}
+.landing-hero-d4 {
+  animation-delay: 0.36s;
+}
+.landing-hero-d5 {
+  animation-delay: 0.45s;
+}
+.landing-hero-d6 {
+  animation-delay: 0.54s;
+}
+
+@keyframes landingSectionIn {
+  from {
+    opacity: 0;
+    transform: translateY(36px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes landingStaggerItem {
+  from {
+    opacity: 0;
+    transform: translateY(22px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.landing-reveal-root.landing-mode-block.landing-reveal-pending {
+  opacity: 0;
+  transform: translateY(36px);
+}
+
+.landing-reveal-root.landing-mode-block.landing-reveal-active {
+  animation: landingSectionIn 0.92s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.landing-reveal-root.landing-mode-stagger.landing-reveal-pending .landing-stagger-item {
+  opacity: 0;
+  transform: translateY(24px);
+}
+
+.landing-reveal-root.landing-mode-stagger.landing-reveal-active .landing-stagger-item:nth-child(1) {
+  animation: landingStaggerItem 0.78s cubic-bezier(0.16, 1, 0.3, 1) 0.04s forwards;
+}
+.landing-reveal-root.landing-mode-stagger.landing-reveal-active .landing-stagger-item:nth-child(2) {
+  animation: landingStaggerItem 0.78s cubic-bezier(0.16, 1, 0.3, 1) 0.12s forwards;
+}
+.landing-reveal-root.landing-mode-stagger.landing-reveal-active .landing-stagger-item:nth-child(3) {
+  animation: landingStaggerItem 0.78s cubic-bezier(0.16, 1, 0.3, 1) 0.2s forwards;
+}
+.landing-reveal-root.landing-mode-stagger.landing-reveal-active .landing-stagger-item:nth-child(4) {
+  animation: landingStaggerItem 0.78s cubic-bezier(0.16, 1, 0.3, 1) 0.28s forwards;
+}
+.landing-reveal-root.landing-mode-stagger.landing-reveal-active .landing-stagger-item:nth-child(5) {
+  animation: landingStaggerItem 0.78s cubic-bezier(0.16, 1, 0.3, 1) 0.36s forwards;
+}
+.landing-reveal-root.landing-mode-stagger.landing-reveal-active .landing-stagger-item:nth-child(6) {
+  animation: landingStaggerItem 0.78s cubic-bezier(0.16, 1, 0.3, 1) 0.44s forwards;
+}
+.landing-reveal-root.landing-mode-stagger.landing-reveal-active .landing-stagger-item:nth-child(7) {
+  animation: landingStaggerItem 0.78s cubic-bezier(0.16, 1, 0.3, 1) 0.52s forwards;
+}
+.landing-reveal-root.landing-mode-stagger.landing-reveal-active .landing-stagger-item:nth-child(8) {
+  animation: landingStaggerItem 0.78s cubic-bezier(0.16, 1, 0.3, 1) 0.6s forwards;
+}
+
+.landing-display-head {
+  font-feature-settings: "ss01" on, "cv02" on;
+  letter-spacing: -0.035em;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -371,18 +833,41 @@ body {
   .bf-ambient__grid,
   .bf-shimmer-edge,
   .bf-live-dot,
-  .bf-landing-aurora,
-  .bf-landing-noise {
+  .bf-landing-noise,
+  .bf-landing-atmosphere .bf-landing-glow,
+  .bf-landing-fluid .bf-landing-blob {
     animation: none !important;
   }
 
-  .bf-landing-aurora {
-    opacity: 0.38;
-    transform: none;
+  .bf-landing-atmosphere .bf-landing-glow--nw,
+  .bf-landing-atmosphere .bf-landing-glow--se {
+    transform: none !important;
+    opacity: 0.55 !important;
+  }
+
+  .bf-landing-atmosphere .bf-landing-glow--mid {
+    transform: translate(-50%, -50%) !important;
+    opacity: 0.52 !important;
+  }
+
+  .bf-landing-fluid .bf-landing-blob {
+    transform: none !important;
+    opacity: 0.3 !important;
   }
 
   .bf-landing-noise {
-    opacity: 0.022;
+    opacity: 0.03;
     transform: none;
+  }
+
+  .landing-hero-in,
+  .landing-reveal-root.landing-mode-block.landing-reveal-pending,
+  .landing-reveal-root.landing-mode-block.landing-reveal-active,
+  .landing-reveal-root.landing-mode-stagger.landing-reveal-pending .landing-stagger-item,
+  .landing-reveal-root.landing-mode-stagger.landing-reveal-active .landing-stagger-item {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+    filter: none !important;
   }
 }

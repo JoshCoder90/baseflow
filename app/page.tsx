@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation"
 import Link from "next/link"
 import { LandingReactiveBackdrop } from "@/components/LandingReactiveBackdrop"
+import { LandingReveal } from "@/components/LandingReveal"
 import { getUser } from "@/lib/auth"
 
 function Check() {
@@ -25,28 +26,28 @@ export default async function Home() {
   }
 
   return (
-    <main className="relative isolate flex min-h-0 w-full flex-1 flex-col overflow-y-auto overflow-x-hidden bg-transparent text-zinc-100 selection:bg-blue-600/25 [animation:fadeIn_0.45s_ease-out]">
+    <main className="relative isolate flex min-h-0 w-full flex-1 flex-col overflow-y-auto overflow-x-hidden bg-transparent text-zinc-100 selection:bg-blue-600/25">
       <LandingReactiveBackdrop />
 
       <div className="relative z-[2] flex min-h-0 flex-1 flex-col">
-      <header className="sticky top-0 z-50 border-b border-white/[0.06] bg-[#030306]/75 backdrop-blur-xl backdrop-saturate-150">
-        <p className="border-b border-white/[0.05] py-2.5 text-center text-[11px] font-medium uppercase tracking-[0.28em] text-zinc-500">
+      <header className="sticky top-0 z-50 border-b border-white/[0.04] bg-[#0a1428]/80 backdrop-blur-xl backdrop-saturate-100">
+        <p className="landing-hero-in landing-hero-d0 border-b border-white/[0.04] py-2.5 text-center text-[11px] font-medium uppercase tracking-[0.3em] text-zinc-600">
           Built for teams running cold email at scale
         </p>
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3.5 sm:px-6">
-          <span className="bg-gradient-to-br from-white to-zinc-400 bg-clip-text text-base font-semibold tracking-tight text-transparent">
+        <div className="landing-hero-in landing-hero-d1 mx-auto flex max-w-6xl items-center justify-between px-4 py-3.5 sm:px-6">
+          <span className="text-lg font-semibold tracking-tight text-white">
             BaseFlow
           </span>
           <div className="flex items-center gap-2 sm:gap-3">
             <Link
               href="/login"
-              className="rounded-lg px-3 py-2 text-sm font-medium text-zinc-400 transition hover:bg-white/[0.06] hover:text-white"
+              className="rounded-full px-4 py-2 text-sm font-medium text-zinc-400 transition hover:bg-white/[0.07] hover:text-white"
             >
               Login
             </Link>
             <Link
               href="/signup"
-              className="bf-btn-primary inline-flex items-center justify-center rounded-lg px-5 py-2.5 text-sm font-semibold text-white"
+              className="bf-btn-primary inline-flex items-center justify-center rounded-full px-6 py-2.5 text-sm font-semibold text-white"
             >
               Start free trial
             </Link>
@@ -54,47 +55,51 @@ export default async function Home() {
         </div>
       </header>
 
-      <section className="mx-auto w-full max-w-6xl px-4 py-20 sm:px-6 sm:py-28">
-        <div className="grid items-center gap-14 lg:grid-cols-2 lg:gap-16">
-          <div className="[animation:fadeInUp_0.6s_ease-out_both]">
-            <p className="text-xs font-semibold uppercase tracking-[0.28em] text-zinc-500">
+      <section className="mx-auto w-full max-w-6xl px-4 pb-24 pt-14 sm:px-6 sm:pb-28 sm:pt-20">
+        <div className="grid items-center gap-12 lg:grid-cols-2 lg:gap-20">
+          <div className="flex flex-col">
+            <p className="landing-hero-in landing-hero-d0 inline-flex w-fit items-center rounded-full border border-white/[0.08] bg-white/[0.03] px-4 py-1.5 text-[11px] font-semibold uppercase tracking-[0.26em] text-zinc-400">
               Autopilot for your inbox
             </p>
-            <h1 className="mt-4 text-4xl font-bold leading-[1.05] tracking-tight text-balance text-white sm:text-5xl lg:text-[2.85rem] lg:leading-[1.08]">
-              Close leads from cold outreach —{" "}
-              <span className="bg-gradient-to-r from-white via-zinc-100 to-zinc-400 bg-clip-text text-transparent">
-                without doing the work.
+            <h1 className="landing-display-head landing-hero-in landing-hero-d1 mt-8 max-w-[22ch] text-balance sm:max-w-none">
+              <span className="block text-[clamp(2.1rem,5vw,3.75rem)] font-semibold leading-[1.04] text-white">
+                Close leads from cold outreach
+              </span>
+              <span className="mt-2 block text-[clamp(2.1rem,5vw,3.75rem)] font-semibold leading-[1.04]">
+                <span className="bg-gradient-to-b from-zinc-100 via-white to-sky-200/90 bg-clip-text text-transparent [text-shadow:0_0_80px_rgba(59,130,246,0.12)]">
+                  without doing the work.
+                </span>
               </span>
             </h1>
-            <p className="mt-6 max-w-lg text-base leading-relaxed text-zinc-400 sm:text-lg">
+            <p className="landing-hero-in landing-hero-d2 mt-8 max-w-lg text-[17px] font-normal leading-relaxed text-zinc-500 sm:text-lg">
               BaseFlow turns replies into booked calls with AI. You run the
               send — we run the back-and-forth until a meeting is on the
               calendar.
             </p>
-            <div className="mt-8 flex flex-wrap items-center gap-3">
+            <div className="landing-hero-in landing-hero-d3 mt-9 flex flex-wrap items-center gap-3">
               <Link
                 href="/signup"
-                className="bf-btn-primary inline-flex items-center justify-center rounded-lg px-5 py-2.5 text-sm font-semibold text-white"
+                className="bf-btn-primary inline-flex items-center justify-center rounded-full px-7 py-3 text-sm font-semibold text-white"
               >
                 Start free trial
               </Link>
               <a
                 href="#product-preview"
-                className="inline-flex items-center justify-center rounded-lg border border-white/[0.12] bg-white/[0.03] px-5 py-2.5 text-sm font-semibold text-white shadow-[0_0_0_1px_rgba(255,255,255,0.04)_inset] transition hover:border-white/20 hover:bg-white/[0.06]"
+                className="inline-flex items-center justify-center rounded-full border border-white/[0.14] bg-white/[0.04] px-7 py-3 text-sm font-semibold text-white shadow-[0_0_0_1px_rgba(255,255,255,0.05)_inset] transition hover:border-white/25 hover:bg-white/[0.08]"
               >
                 Watch demo
               </a>
             </div>
-            <p className="mt-5 text-xs text-zinc-500">
+            <p className="landing-hero-in landing-hero-d4 mt-6 text-xs font-medium tracking-wide text-zinc-500">
               No card required to explore · Connect Gmail in minutes
             </p>
           </div>
 
-          <div
-            className="bf-surface relative overflow-hidden rounded-2xl p-3 sm:p-5 [animation:fadeInUp_0.65s_ease-out_0.08s_both]"
+            <div
+            className="bf-surface landing-hero-in landing-hero-d5 relative overflow-hidden rounded-2xl border-white/[0.07] p-3 shadow-[0_0_0_1px_rgba(255,255,255,0.06)_inset,0_32px_80px_-36px_rgba(0,0,0,0.85)] sm:p-5"
             aria-label="Inbox preview"
           >
-            <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/25 to-transparent" />
+            <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/15 to-transparent" />
             <div className="mb-3 flex items-center justify-between border-b border-white/[0.06] pb-3">
               <span className="text-xs font-medium text-zinc-500">Inbox</span>
               <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[0.65rem] font-semibold uppercase tracking-widest text-emerald-300/90">
@@ -168,20 +173,17 @@ export default async function Home() {
         </div>
       </section>
 
-      <section className="py-24">
-        <div className="mx-auto max-w-6xl px-4 sm:px-6">
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500">
+      <LandingReveal mode="stagger" className="mx-auto max-w-6xl px-4 py-24 sm:px-6">
+          <p className="landing-stagger-item text-xs font-semibold uppercase tracking-[0.22em] text-zinc-500">
             How it works
           </p>
-          <h2 className="mt-3 max-w-2xl text-3xl font-bold tracking-tight text-white sm:text-4xl">
+          <h2 className="landing-stagger-item landing-display-head mt-4 max-w-3xl text-[clamp(1.85rem,4vw,2.75rem)] font-semibold leading-[1.12] tracking-tight text-balance text-white">
             One pipeline. Three moves.
-            <span className="text-zinc-500"> </span>
-            <span className="text-zinc-400 sm:block sm:mt-1 sm:text-3xl">
+            <span className="mt-2 block text-zinc-400 sm:mt-3 sm:text-[clamp(1.5rem,3vw,2.1rem)] sm:leading-snug">
               No extra tools. No hand-holding.
             </span>
           </h2>
 
-          <div className="mt-12 space-y-3">
             {(
               [
                 {
@@ -203,7 +205,7 @@ export default async function Home() {
             ).map((step) => (
               <div
                 key={step.n}
-                className="bf-surface group flex flex-col gap-4 rounded-2xl p-5 sm:flex-row sm:items-center sm:gap-8 sm:p-6"
+                className={`landing-stagger-item bf-surface group flex flex-col gap-4 rounded-2xl p-5 sm:flex-row sm:items-center sm:gap-8 sm:p-6 ${step.n === "01" ? "mt-10" : "mt-4"}`}
               >
                 <div className="flex w-20 shrink-0 items-center justify-center rounded-xl border border-white/[0.1] bg-black/40 px-3 py-2 font-mono text-sm font-bold tabular-nums text-white shadow-[0_0_0_1px_rgba(255,255,255,0.04)_inset]">
                   {step.n}
@@ -216,16 +218,16 @@ export default async function Home() {
                 </div>
               </div>
             ))}
-          </div>
-        </div>
-      </section>
+      </LandingReveal>
 
-      <section className="py-24">
-        <div className="mx-auto max-w-6xl px-4 sm:px-6">
-          <h2 className="mx-auto max-w-3xl text-center text-3xl font-bold leading-snug tracking-tight text-balance text-white sm:text-4xl">
-            Turn cold outreach into booked calls — automatically
+      <LandingReveal className="mx-auto max-w-6xl px-4 py-24 sm:px-6">
+          <h2 className="landing-display-head mx-auto max-w-3xl text-center text-[clamp(1.75rem,3.8vw,2.65rem)] font-semibold leading-snug tracking-tight text-balance text-white">
+            Turn cold outreach into booked calls —{" "}
+            <span className="bg-gradient-to-r from-blue-100 to-white bg-clip-text text-transparent">
+              automatically
+            </span>
           </h2>
-          <p className="mx-auto mt-3 max-w-xl text-center text-sm text-zinc-500">
+          <p className="mx-auto mt-4 max-w-xl text-center text-sm font-medium text-zinc-500">
             Outcomes teams report in the first 14 days on BaseFlow.
           </p>
           <div className="mt-10 flex flex-col gap-3 sm:flex-row sm:justify-center sm:gap-4">
@@ -244,15 +246,13 @@ export default async function Home() {
               </div>
             ))}
           </div>
-        </div>
-      </section>
+      </LandingReveal>
 
-      <section id="product-preview" className="py-24">
-        <div className="mx-auto max-w-6xl px-4 sm:px-6">
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500">
+      <LandingReveal className="mx-auto max-w-6xl px-4 py-24 sm:px-6" id="product-preview">
+          <p className="text-xs font-semibold uppercase tracking-[0.22em] text-zinc-500">
             In the app
           </p>
-          <h2 className="mt-3 text-2xl font-bold text-white sm:text-3xl">
+          <h2 className="landing-display-head mt-4 max-w-2xl text-2xl font-semibold leading-tight tracking-tight text-white sm:text-3xl">
             Everything you need to run one campaign end-to-end
           </h2>
           <div className="bf-surface mt-10 max-w-3xl rounded-2xl p-6 sm:p-8">
@@ -307,17 +307,15 @@ export default async function Home() {
             </div>
             <p className="mt-2.5 text-xs text-zinc-500">Outreach in progress</p>
           </div>
-        </div>
-      </section>
+      </LandingReveal>
 
-      <section className="py-24">
-        <div className="mx-auto max-w-6xl px-4 sm:px-6">
+      <LandingReveal className="mx-auto max-w-6xl px-4 py-24 sm:px-6">
           <div className="grid gap-10 lg:grid-cols-12 lg:items-start">
             <div className="lg:col-span-5">
-              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500">
+              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-zinc-500">
                 The edge
               </p>
-              <h2 className="mt-3 text-3xl font-bold tracking-tight text-white sm:text-4xl">
+              <h2 className="landing-display-head mt-4 text-3xl font-semibold tracking-tight text-white sm:text-4xl">
                 Why BaseFlow
               </h2>
             </div>
@@ -343,15 +341,13 @@ export default async function Home() {
               ))}
             </ul>
           </div>
-        </div>
-      </section>
+      </LandingReveal>
 
-      <section className="py-24">
-        <div className="mx-auto max-w-6xl px-4 sm:px-6">
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500">
+      <LandingReveal className="mx-auto max-w-6xl px-4 py-24 sm:px-6">
+          <p className="text-xs font-semibold uppercase tracking-[0.22em] text-zinc-500">
             Pricing
           </p>
-          <h2 className="mt-3 text-3xl font-bold tracking-tight text-white sm:text-4xl">
+          <h2 className="landing-display-head mt-4 text-3xl font-semibold tracking-tight text-white sm:text-4xl">
             Simple pricing. No surprises.
           </h2>
           <p className="mt-3 max-w-2xl text-sm text-zinc-400">
@@ -416,28 +412,30 @@ export default async function Home() {
           <p className="mt-8 text-center text-sm text-zinc-500">
             Cancel anytime · keep your data
           </p>
-        </div>
-      </section>
+      </LandingReveal>
 
-      <section className="px-4 py-24 sm:px-6">
+      <LandingReveal className="px-4 py-24 sm:px-6">
         <div className="bf-surface mx-auto max-w-4xl rounded-2xl px-6 py-16 text-center sm:px-8 sm:py-16">
-          <h2 className="text-2xl font-bold tracking-tight text-white sm:text-3xl">
-            Stop chasing leads. Start closing them.
+          <h2 className="landing-display-head text-2xl font-semibold tracking-tight text-white sm:text-3xl">
+            Stop chasing leads.{" "}
+            <span className="bg-gradient-to-r from-white to-blue-100/90 bg-clip-text text-transparent">
+              Start closing them.
+            </span>
           </h2>
-          <p className="mt-2 text-sm text-zinc-500">
+          <p className="mt-3 text-sm text-zinc-500">
             Join teams who use BaseFlow to turn cold outreach into revenue.
           </p>
-          <div className="mt-7 flex flex-col items-center gap-2 sm:flex-row sm:justify-center sm:gap-3">
+          <div className="mt-8 flex flex-col items-center gap-2 sm:flex-row sm:justify-center sm:gap-3">
             <Link
               href="/signup"
-              className="bf-btn-primary inline-flex w-full items-center justify-center rounded-lg px-5 py-2.5 text-sm font-semibold text-white sm:w-auto"
+              className="bf-btn-primary inline-flex w-full items-center justify-center rounded-full px-8 py-3 text-sm font-semibold text-white sm:w-auto"
             >
               Start free trial
             </Link>
             <span className="text-xs text-zinc-500">Takes a few minutes</span>
           </div>
         </div>
-      </section>
+      </LandingReveal>
 
       <footer className="mt-auto py-10">
         <p className="text-center text-sm text-zinc-500">© BaseFlow</p>
