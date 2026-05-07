@@ -1,9 +1,34 @@
 import OpenAI from "openai"
 
+/** Fast path when the query already separates niche and place (no LLM). */
+function tryParseSearchQueryHeuristic(query: string): { niche: string; location: string } | null {
+  const q = query.trim()
+  if (q.length < 3) return null
+
+  const inMatch = q.match(/^(.+?)\s+in\s+(.+)$/i)
+  if (inMatch) {
+    const niche = inMatch[1].trim()
+    const location = inMatch[2].trim()
+    if (niche.length >= 2 && location.length >= 2) return { niche, location }
+  }
+
+  const nearMatch = q.match(/^(.+?)\s+near\s+(.+)$/i)
+  if (nearMatch) {
+    const niche = nearMatch[1].trim()
+    const location = nearMatch[2].trim()
+    if (niche.length >= 2 && location.length >= 2) return { niche, location }
+  }
+
+  return null
+}
+
 /** Parse natural language search into niche + location for Google Places */
 export async function parseSearchQuery(
   query: string
 ): Promise<{ niche: string; location: string }> {
+  const heuristic = tryParseSearchQueryHeuristic(query)
+  if (heuristic) return heuristic
+
   const openaiKey = process.env.OPENAI_API_KEY
   if (!openaiKey) {
     const match = query.match(/^(.+?)\s+in\s+(.+)$/i)

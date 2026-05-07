@@ -9,9 +9,9 @@ import {
   MAX_LEADS_PER_CAMPAIGN,
 } from "@/lib/campaign-leads-insert"
 import {
-  buildAllSearchAreaStrings,
   buildPlacesKeywordVariants,
   expandLocationsWithAI,
+  getStaticExpandedAreaStrings,
   mergeSearchAreaStringLists,
 } from "@/lib/lead-search-expansion"
 import { countEmailLeadsForContext } from "@/lib/lead-validity"
@@ -50,7 +50,13 @@ const BATCH_SIZE = 36
 const SMART_STOP_MAX_BUSINESSES_SCANNED = 4000
 const MAX_RAW_BUSINESSES = 2500
 const MAX_CONSECUTIVE_EMPTY_WAVES = 3
-const MAX_SEARCH_AREA_STRINGS = 52
+/**
+ * Named suburbs / metro anchors only — each uses one Geocoding request.
+ * Grid offsets below add coverage without Geocoding API calls.
+ */
+const MAX_NAMED_AREA_GEOCODES = 12
+/** LLM-suggested localities merged into the named list (then capped). */
+const MAX_AI_LOCATION_HINTS = 4
 const GEOCODE_BATCH_SIZE = 10
 const MAX_KEYWORD_VARIANTS = 24
 const FETCH_TIMEOUT_MS = 20000
@@ -107,6 +113,27 @@ export type CampaignScrapeCheckpoint = {
 }
 
 type SearchPoint = { area: string; lat: number; lng: number }
+
+/** ~7–8 km offsets around primary — same coverage as geocoding many "north/near/downtown" strings without billing each phrase. */
+const PREP_GRID_OFFSETS_DEG = [
+  { lat: 0.07, lng: 0 },
+  { lat: -0.07, lng: 0 },
+  { lat: 0, lng: 0.07 },
+  { lat: 0, lng: -0.07 },
+  { lat: 0.07, lng: 0.07 },
+  { lat: 0.07, lng: -0.07 },
+  { lat: -0.07, lng: 0.07 },
+  { lat: -0.07, lng: -0.07 },
+] as const
+
+function buildGridOffsetSearchPoints(primary: GeocodedTarget): SearchPoint[] {
+  return PREP_GRID_OFFSETS_DEG.map((o) => ({
+    area: `${primary.label} (+${o.lat}, ${o.lng})`,
+    lat: primary.lat + o.lat,
+    lng: primary.lng + o.lng,
+  }))
+}
+
 type PlaceResult = {
   place_id?: string
   name?: string
@@ -354,15 +381,15 @@ export async function prepareCampaignScrapeCheckpoint(params: {
     .eq("id", ctx.campaignId)
     .eq("user_id", ctx.userId)
 
-  const aiExtraAreas = await expandLocationsWithAI(location, niche)
-  const searchAreaStrings = mergeSearchAreaStringLists(
-    buildAllSearchAreaStrings(location),
+  const aiExtraAreas = (await expandLocationsWithAI(location, niche)).slice(0, MAX_AI_LOCATION_HINTS)
+  const namedCandidates = mergeSearchAreaStringLists(
+    getStaticExpandedAreaStrings(location),
     aiExtraAreas
-  ).slice(0, MAX_SEARCH_AREA_STRINGS)
+  ).slice(0, MAX_NAMED_AREA_GEOCODES)
 
   const geocodedExpansion: SearchPoint[] = []
-  for (let off = 0; off < searchAreaStrings.length; off += GEOCODE_BATCH_SIZE) {
-    const chunk = searchAreaStrings.slice(off, off + GEOCODE_BATCH_SIZE)
+  for (let off = 0; off < namedCandidates.length; off += GEOCODE_BATCH_SIZE) {
+    const chunk = namedCandidates.slice(off, off + GEOCODE_BATCH_SIZE)
     const geoResults = await Promise.all(
       chunk.map(async (area) => {
         const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(area)}&key=${apiKey}`
@@ -394,6 +421,7 @@ export async function prepareCampaignScrapeCheckpoint(params: {
     lat: primaryTarget.lat,
     lng: primaryTarget.lng,
   })
+  for (const p of buildGridOffsetSearchPoints(primaryTarget)) pushPoint(p)
   for (const p of geocodedExpansion) pushPoint(p)
 
   const rawKeywordVariants = await buildPlacesKeywordVariants(niche)
@@ -640,7 +668,24 @@ export async function runCampaignScrapeBatch(params: {
   }
 
   const searchQuery = (campaign.target_search_query as string) || ""
-  const { niche, location } = await parseSearchQuery(searchQuery)
+  const checkpointEarly = campaign.scrape_checkpoint as CampaignScrapeCheckpoint | null
+
+  let niche: string
+  let location: string
+  if (
+    checkpointEarly?.v === 1 &&
+    typeof checkpointEarly.niche === "string" &&
+    checkpointEarly.niche.trim().length > 0 &&
+    typeof checkpointEarly.location === "string" &&
+    checkpointEarly.location.trim().length > 0
+  ) {
+    niche = checkpointEarly.niche.trim()
+    location = checkpointEarly.location.trim()
+  } else {
+    const parsed = await parseSearchQuery(searchQuery)
+    niche = parsed.niche
+    location = parsed.location
+  }
 
   const leadCap = Math.min(MAX_LEADS, SCRAPE_POLICY.maxLeadsPerScrape)
 

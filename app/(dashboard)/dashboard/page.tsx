@@ -60,6 +60,74 @@ function startOfTodayUtcIso(): string {
   return d.toISOString()
 }
 
+function lastNDayKeysUtc(n: number): string[] {
+  const anchor = new Date()
+  anchor.setUTCHours(0, 0, 0, 0)
+  anchor.setUTCDate(anchor.getUTCDate() - (n - 1))
+  const keys: string[] = []
+  for (let i = 0; i < n; i++) {
+    const d = new Date(anchor)
+    d.setUTCDate(anchor.getUTCDate() + i)
+    keys.push(d.toISOString().slice(0, 10))
+  }
+  return keys
+}
+
+function SentTrendChart({ values }: { values: number[] }) {
+  const w = 560
+  const h = 140
+  const pad = 10
+  const innerW = w - pad * 2
+  const innerH = h - pad * 2
+  const max = Math.max(...values, 1)
+  const pts = values.map((v, i) => {
+    const x =
+      pad +
+      (values.length <= 1 ? innerW / 2 : (i / Math.max(values.length - 1, 1)) * innerW)
+    const y = pad + innerH - (v / max) * innerH
+    return [x, y] as const
+  })
+  if (pts.length === 0) {
+    return (
+      <div className="flex h-36 items-center justify-center text-sm text-zinc-500">
+        No sends in this window yet
+      </div>
+    )
+  }
+  const lineD = pts
+    .map(([x, y], i) => `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`)
+    .join(" ")
+  const first = pts[0]
+  const last = pts[pts.length - 1]
+  const floorY = pad + innerH
+  const areaD = `${lineD} L ${last[0]} ${floorY} L ${first[0]} ${floorY} Z`
+
+  return (
+    <svg
+      viewBox={`0 0 ${w} ${h}`}
+      className="h-36 w-full min-w-0"
+      preserveAspectRatio="none"
+      aria-hidden
+    >
+      <defs>
+        <linearGradient id="bfSentTrendFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="rgb(74 222 128)" stopOpacity="0.38" />
+          <stop offset="100%" stopColor="rgb(74 222 128)" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path d={areaD} fill="url(#bfSentTrendFill)" />
+      <path
+        d={lineD}
+        fill="none"
+        stroke="rgb(52 211 153)"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
 export default function DashboardPage() {
   const pathname = usePathname()
   const [emailsSentToday, setEmailsSentToday] = useState(0)
@@ -69,6 +137,7 @@ export default function DashboardPage() {
   const [activeCampaigns, setActiveCampaigns] = useState(0)
   const [leadsFoundToday, setLeadsFoundToday] = useState(0)
   const [dashboardCampaigns, setDashboardCampaigns] = useState<DashboardCampaignCard[]>([])
+  const [sentTrend14d, setSentTrend14d] = useState<number[]>(() => Array.from({ length: 14 }, () => 0))
 
   useEffect(() => {
     let cancelled = false
@@ -96,6 +165,7 @@ export default function DashboardPage() {
             setActiveCampaigns(0)
             setLeadsFoundToday(0)
             setDashboardCampaigns([])
+            setSentTrend14d(Array.from({ length: 14 }, () => 0))
           }
           return
         }
@@ -115,6 +185,7 @@ export default function DashboardPage() {
             setActiveCampaigns(safe.activeCampaigns)
             setLeadsFoundToday(safe.leadsFoundToday)
             setDashboardCampaigns([])
+            setSentTrend14d(Array.from({ length: 14 }, () => 0))
           }
           return
         }
@@ -133,13 +204,16 @@ export default function DashboardPage() {
             setActiveCampaigns(0)
             setLeadsFoundToday(0)
             setDashboardCampaigns([])
+            setSentTrend14d(Array.from({ length: 14 }, () => 0))
           }
           return
         }
 
         const todayStart = startOfTodayUtcIso()
+        const trendDayKeys = lastNDayKeysUtc(14)
+        const trendStartIso = `${trendDayKeys[0]}T00:00:00.000Z`
 
-        const [{ count: sentToday }, { data: leadsRows }] = await Promise.all([
+        const [{ count: sentToday }, { data: leadsRows }, { data: trendRows }] = await Promise.all([
           supabase
             .from("campaign_messages")
             .select("*", { count: "exact", head: true })
@@ -150,6 +224,12 @@ export default function DashboardPage() {
             .from("leads")
             .select("id, deal_stage, campaign_id, created_at")
             .in("campaign_id", campaignIds),
+          supabase
+            .from("campaign_messages")
+            .select("sent_at")
+            .in("campaign_id", campaignIds)
+            .eq("status", "sent")
+            .gte("sent_at", trendStartIso),
         ])
 
         const leads = leadsRows ?? []
@@ -163,6 +243,16 @@ export default function DashboardPage() {
             leadsPerCampaign[cid] = (leadsPerCampaign[cid] ?? 0) + 1
           }
         }
+
+        const countsByDay: Record<string, number> = {}
+        for (const k of trendDayKeys) countsByDay[k] = 0
+        for (const row of trendRows ?? []) {
+          const at = row.sent_at
+          if (typeof at !== "string") continue
+          const key = at.slice(0, 10)
+          if (key in countsByDay) countsByDay[key]++
+        }
+        const trendSeries = trendDayKeys.map((k) => countsByDay[k] ?? 0)
 
         const cards: DashboardCampaignCard[] = campaigns.map((c) => {
           const id = c.id as string
@@ -206,6 +296,7 @@ export default function DashboardPage() {
           setActiveCampaigns(liveCampaigns)
           setLeadsFoundToday(foundToday)
           setDashboardCampaigns(cards)
+          setSentTrend14d(trendSeries)
         }
       } catch {
         if (!cancelled) {
@@ -216,6 +307,7 @@ export default function DashboardPage() {
           setActiveCampaigns(safe.activeCampaigns)
           setLeadsFoundToday(safe.leadsFoundToday)
           setDashboardCampaigns([])
+          setSentTrend14d(Array.from({ length: 14 }, () => 0))
         }
       }
     }
@@ -226,6 +318,18 @@ export default function DashboardPage() {
     }
   }, [])
 
+  const totalLeads = dashboardCampaigns.reduce((acc, c) => acc + (c.leads_count ?? 0), 0)
+  const totalSentEver = dashboardCampaigns.reduce(
+    (acc, c) => acc + (typeof c.sent_count === "number" ? c.sent_count : 0),
+    0
+  )
+  const qualifiedPct =
+    pipelineLeads > 0
+      ? Math.min(100, Math.round((meetingsBooked / pipelineLeads) * 1000) / 10)
+      : 0
+
+  const chartTickIndexes = [0, 3, 6, 9, 12, 13]
+
   return (
     <div
       key={pathname}
@@ -235,34 +339,239 @@ export default function DashboardPage() {
       <header className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-3xl font-semibold tracking-tight text-white sm:text-[2rem]">
-            Dashboard
+            Welcome back
           </h1>
-          <p className="mt-1.5 max-w-xl text-sm leading-relaxed text-zinc-500">
-            What&apos;s happening, what needs you, and what to do next.
-          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-zinc-500">
+            <span className="inline-flex items-center gap-1.5 font-medium text-zinc-300">
+              <svg
+                className="size-4 text-emerald-400"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+                aria-hidden
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"
+                />
+              </svg>
+              Dashboard
+            </span>
+            <span className="text-zinc-600">·</span>
+            <span>Pipeline, sends, and next actions</span>
+          </div>
         </div>
         <div className="flex flex-wrap gap-2">
           <Link
             href="/dashboard/campaigns"
-            className="inline-flex items-center justify-center rounded-full bg-white px-5 py-2.5 text-sm font-semibold text-zinc-950 shadow-[0_0_0_1px_rgba(255,255,255,0.2)_inset,0_14px_40px_-18px_rgba(255,255,255,0.35)] transition hover:bg-zinc-100"
+            className="inline-flex items-center justify-center rounded-[10px] border border-white/[0.14] bg-white/[0.04] px-5 py-2.5 text-sm font-semibold text-white shadow-[0_0_0_1px_rgba(255,255,255,0.04)_inset] transition hover:border-white/25 hover:bg-white/[0.07]"
           >
-            New campaign
+            + New campaign
           </Link>
           <Link
             href="/dashboard/inbox"
-            className="inline-flex items-center justify-center rounded-full border border-white/[0.12] bg-white/[0.04] px-5 py-2.5 text-sm font-medium text-zinc-100 shadow-[0_0_0_1px_rgba(255,255,255,0.04)_inset] transition hover:border-white/20 hover:bg-white/[0.07]"
+            className="inline-flex items-center justify-center rounded-[10px] border border-white/[0.12] bg-black/30 px-5 py-2.5 text-sm font-medium text-zinc-100 transition hover:border-white/20 hover:bg-white/[0.05]"
           >
             Open inbox
           </Link>
         </div>
       </header>
 
-      {/* Needs attention — first */}
+      {/* Pipeline overview — hero */}
       <section
-        className="bf-panel relative w-full overflow-hidden rounded-2xl p-6 ring-1 ring-amber-500/15"
+        className="bf-panel relative w-full overflow-hidden rounded-[12px] p-6 ring-1 ring-emerald-500/10"
+        aria-labelledby="pipeline-overview-heading"
+      >
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_70%_55%_at_100%_0%,rgba(74,222,128,0.09),transparent_55%)]" />
+        <div className="relative flex flex-col gap-6">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <span className="mt-0.5 flex size-9 items-center justify-center rounded-lg bg-emerald-500/15 ring-1 ring-emerald-400/25">
+                <svg
+                  className="size-5 text-emerald-400"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                  aria-hidden
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"
+                  />
+                </svg>
+              </span>
+              <div>
+                <h2
+                  id="pipeline-overview-heading"
+                  className="text-lg font-semibold tracking-tight text-white"
+                >
+                  Pipeline overview
+                </h2>
+                <p className="mt-0.5 text-xs text-zinc-500">
+                  Interested + call booked across all campaigns
+                </p>
+              </div>
+            </div>
+            <div className="inline-flex items-center gap-2 rounded-full border border-white/[0.08] bg-black/30 px-3 py-1.5 text-[11px] font-medium text-zinc-400">
+              <svg
+                className="size-3.5 text-zinc-500"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+                aria-hidden
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                />
+              </svg>
+              Live workspace
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                Active pipeline
+              </p>
+              <p className="mt-1 text-4xl font-semibold tabular-nums tracking-tight text-emerald-400 sm:text-[2.65rem]">
+                {pipelineLeads ?? 0}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-6 text-sm lg:justify-end">
+              <div>
+                <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+                  Sent today
+                </p>
+                <p className="mt-1 font-semibold tabular-nums text-white">
+                  {emailsSentToday ?? 0}
+                </p>
+              </div>
+              <div>
+                <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+                  Active campaigns
+                </p>
+                <p className="mt-1 font-semibold tabular-nums text-white">
+                  {activeCampaigns ?? 0}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {[
+              { label: "Total leads", value: totalLeads },
+              { label: "New replies", value: newReplies ?? 0 },
+              { label: "Meetings booked", value: meetingsBooked ?? 0 },
+              { label: "Leads found today", value: leadsFoundToday ?? 0 },
+            ].map((tile) => (
+              <div
+                key={tile.label}
+                className="rounded-[10px] border border-white/[0.07] bg-black/35 px-4 py-3 shadow-[0_0_0_1px_rgba(255,255,255,0.03)_inset]"
+              >
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                  {tile.label}
+                </p>
+                <p className="mt-1 text-xl font-semibold tabular-nums text-white">
+                  {tile.value}
+                </p>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex flex-col gap-3 border-t border-white/[0.06] pt-5 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                Messages sent (all time)
+              </p>
+              <p className="mt-1 text-3xl font-semibold tabular-nums tracking-tight text-emerald-400">
+                {totalSentEver.toLocaleString()}
+              </p>
+            </div>
+            <div className="inline-flex items-center gap-2 self-start rounded-full border border-emerald-500/25 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-300 sm:self-auto">
+              <svg
+                className="size-3.5 text-emerald-400"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+                aria-hidden
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"
+                />
+              </svg>
+              Qualified {qualifiedPct}%
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* 14-day send trend */}
+      <section className="bf-panel overflow-hidden rounded-[12px] ring-1 ring-white/[0.06]">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] px-6 py-5">
+          <div className="flex items-center gap-3">
+            <span className="flex size-9 items-center justify-center rounded-lg bg-violet-500/15 ring-1 ring-violet-400/20">
+              <svg
+                className="size-5 text-violet-300"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+                aria-hidden
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z"
+                />
+              </svg>
+            </span>
+            <div>
+              <h2 className="text-base font-semibold text-white">14-day outbound trend</h2>
+              <p className="mt-0.5 text-xs text-zinc-500">Emails sent per day · all campaigns</p>
+            </div>
+          </div>
+          <div className="inline-flex items-center gap-2 text-[11px] font-medium text-zinc-500">
+            <span className="size-2 rounded-full bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.55)]" />
+            Sends
+          </div>
+        </div>
+        <div className="px-4 pb-2 pt-4 sm:px-6">
+          <SentTrendChart values={sentTrend14d} />
+          <div className="mt-2 flex justify-between px-1 text-[10px] font-medium uppercase tracking-wide text-zinc-600">
+            {chartTickIndexes.map((i) => {
+              const d = new Date()
+              d.setUTCHours(0, 0, 0, 0)
+              d.setUTCDate(d.getUTCDate() - (13 - i))
+              const label = d.toLocaleDateString(undefined, {
+                month: "short",
+                day: "numeric",
+              })
+              return (
+                <span key={i} className="tabular-nums">
+                  {label}
+                </span>
+              )
+            })}
+          </div>
+        </div>
+      </section>
+
+      {/* Needs attention */}
+      <section
+        className="bf-panel relative w-full overflow-hidden rounded-[12px] p-6 ring-1 ring-amber-500/12"
         aria-labelledby="needs-attention-heading"
       >
-        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_80%_60%_at_100%_0%,rgba(245,158,11,0.08),transparent_55%)]" />
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_80%_60%_at_100%_0%,rgba(245,158,11,0.07),transparent_55%)]" />
         <div className="relative flex items-center justify-between gap-4 pb-6">
           <h2 id="needs-attention-heading" className="text-lg font-semibold text-white">
             Needs attention
@@ -275,7 +584,7 @@ export default function DashboardPage() {
           </Link>
         </div>
         <div className="relative grid w-full grid-cols-1 gap-4 md:grid-cols-2 md:gap-5">
-          <div className="rounded-xl border border-white/[0.08] bg-black/25 px-5 py-4 shadow-[0_0_0_1px_rgba(255,255,255,0.03)_inset]">
+          <div className="rounded-[10px] border border-white/[0.08] bg-black/30 px-5 py-4 shadow-[0_0_0_1px_rgba(255,255,255,0.03)_inset]">
             <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
               New replies
             </p>
@@ -284,7 +593,7 @@ export default function DashboardPage() {
             </p>
             <p className="mt-1 text-xs text-zinc-500">Inbound messages</p>
           </div>
-          <div className="rounded-xl border border-white/[0.08] bg-black/25 px-5 py-4 shadow-[0_0_0_1px_rgba(255,255,255,0.03)_inset]">
+          <div className="rounded-[10px] border border-white/[0.08] bg-black/30 px-5 py-4 shadow-[0_0_0_1px_rgba(255,255,255,0.03)_inset]">
             <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
               In pipeline
             </p>
@@ -293,30 +602,6 @@ export default function DashboardPage() {
             </p>
             <p className="mt-1 text-xs text-zinc-500">Interested or call booked</p>
           </div>
-        </div>
-      </section>
-
-      {/* Primary KPI row */}
-      <section className="grid w-full grid-cols-1 gap-4 md:grid-cols-3 md:gap-5">
-        <div className="group rounded-2xl border border-blue-500/25 bg-gradient-to-br from-blue-500/[0.12] via-blue-950/20 to-transparent p-6 transition duration-300 hover:-translate-y-0.5 hover:border-blue-400/35 hover:shadow-[0_20px_50px_-28px_rgba(59,130,246,0.45)] motion-reduce:transition-none motion-reduce:hover:translate-y-0">
-          <p className="text-2xl font-semibold tabular-nums tracking-tight text-white">
-            {leadsFoundToday || 0}
-          </p>
-          <p className="text-sm text-zinc-400">Leads found today</p>
-        </div>
-
-        <div className="group rounded-2xl border border-emerald-500/25 bg-gradient-to-br from-emerald-500/[0.12] via-emerald-950/15 to-transparent p-6 transition duration-300 hover:-translate-y-0.5 hover:border-emerald-400/35 hover:shadow-[0_20px_50px_-28px_rgba(16,185,129,0.4)] motion-reduce:transition-none motion-reduce:hover:translate-y-0">
-          <p className="text-2xl font-semibold tabular-nums tracking-tight text-white">
-            {activeCampaigns ?? 0}
-          </p>
-          <p className="text-sm text-zinc-400">Active campaigns</p>
-        </div>
-
-        <div className="group rounded-2xl border border-amber-500/25 bg-gradient-to-br from-amber-500/[0.12] via-amber-950/15 to-transparent p-6 transition duration-300 hover:-translate-y-0.5 hover:border-amber-400/35 hover:shadow-[0_20px_50px_-28px_rgba(245,158,11,0.35)] motion-reduce:transition-none motion-reduce:hover:translate-y-0">
-          <p className="text-2xl font-semibold tabular-nums tracking-tight text-white">
-            {meetingsBooked ?? 0}
-          </p>
-          <p className="text-sm text-zinc-400">Meetings booked</p>
         </div>
       </section>
 

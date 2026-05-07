@@ -18,8 +18,10 @@ import {
   fetchLeadIdsWithInboundMessages,
 } from "@/lib/lead-inbound-reply-status"
 
-/** Polling for live `campaigns` row — `/api/get-campaign` (2s, stops when `completed`). Full leads/queue: Supabase in `fetchCampaignData` + Realtime. */
-const CAMPAIGN_STATUS_POLL_MS = 2000
+/** While scraping, backup poll so UI stays in sync if Realtime lags or events batch. */
+const SCRAPE_PROGRESS_POLL_MS = 1200
+/** Debounce full refetch after Realtime bursts — avoids out-of-order HTTP responses overwriting newer lead counts. */
+const LEADS_REALTIME_REFETCH_DEBOUNCE_MS = 450
 const LEADS_PAGE = 1000
 
 type Campaign = {
@@ -403,6 +405,74 @@ export function CampaignDetailContent({
   const fetchCampaignDataRef = useRef(fetchCampaignData)
   fetchCampaignDataRef.current = fetchCampaignData
 
+  const leadsRealtimeDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const scheduleDebouncedFullCampaignFetch = useCallback(() => {
+    if (leadsRealtimeDebounceRef.current) clearTimeout(leadsRealtimeDebounceRef.current)
+    leadsRealtimeDebounceRef.current = setTimeout(() => {
+      leadsRealtimeDebounceRef.current = null
+      void fetchCampaignDataRef.current()
+    }, LEADS_REALTIME_REFETCH_DEBOUNCE_MS)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (leadsRealtimeDebounceRef.current) clearTimeout(leadsRealtimeDebounceRef.current)
+    }
+  }, [])
+
+  /** Apply Realtime row immediately so counts/progress update every lead; debounced full sync avoids races. */
+  const applyLeadRealtimePayload = useCallback(
+    (
+      payload: {
+        eventType: string
+        new: Record<string, unknown> | null
+        old: Record<string, unknown> | null
+      },
+      scope: "campaign" | "audience",
+      audienceIdForScope: string | null
+    ) => {
+      const ev = payload.eventType
+      if (ev === "INSERT" && payload.new) {
+        const row = payload.new
+        if (scope === "campaign") {
+          if (String(row.campaign_id ?? "") !== campaignId) return
+        } else if (!audienceIdForScope || String(row.audience_id ?? "") !== audienceIdForScope) {
+          return
+        }
+        setLeadsForThisCampaign((prev) => {
+          const id = String(row.id ?? "")
+          if (!id || prev.some((l) => l.id === id)) return prev
+          return [...prev, normalizeLead(row)]
+        })
+      } else if (ev === "UPDATE" && payload.new) {
+        const row = payload.new
+        if (scope === "campaign") {
+          if (String(row.campaign_id ?? "") !== campaignId) return
+        } else if (!audienceIdForScope || String(row.audience_id ?? "") !== audienceIdForScope) {
+          return
+        }
+        setLeadsForThisCampaign((prev) => {
+          const id = String(row.id ?? "")
+          if (!id) return prev
+          const next = normalizeLead(row)
+          const idx = prev.findIndex((l) => l.id === id)
+          if (idx === -1) return [...prev, next]
+          const copy = [...prev]
+          copy[idx] = next
+          return copy
+        })
+      } else if (ev === "DELETE") {
+        const oldRow = payload.old
+        const id = oldRow ? String(oldRow.id ?? "") : ""
+        if (!id) return
+        setLeadsForThisCampaign((prev) => prev.filter((l) => l.id !== id))
+      }
+      scheduleDebouncedFullCampaignFetch()
+    },
+    [campaignId, scheduleDebouncedFullCampaignFetch]
+  )
+
   /** Stop status polling only after sending is fully done — scrape `completed` still needs live updates. */
   const pollStops = useMemo(() => {
     const st = (liveCampaign.status ?? campaign.status ?? "").toLowerCase()
@@ -413,39 +483,27 @@ export function CampaignDetailContent({
     return s > 0 && ns === 0
   }, [liveCampaign.status, campaign.status, leadsForThisCampaign.length, queueStats.sent])
 
-  /**
-   * Light poll: `/api/get-campaign` every 2s for live row fields until sending is complete.
-   */
+  /** Backup poll while scrape/enrich runs — keeps stats aligned if Realtime or batch HTTP races. */
   useEffect(() => {
-    if (!campaignId) return
-    if (pollStops) return
-    console.log("Campaign loaded once — no polling")
-    void (async () => {
-      const res = await fetch(
-        `/api/get-campaign?id=${encodeURIComponent(campaignId)}`
-      )
-      if (!res.ok) return
-      const data = (await res.json()) as Record<string, unknown> & { id?: string }
-      if (!data.id) return
-      const { body: _b, error: _err, ...row } = data
-      setApiPatch((p) => ({ ...p, ...(row as unknown as Partial<Campaign>) }))
-      const st = row.status
-      const lf = row.leads_found
-      setLiveCampaign((prev) => ({
-        status: typeof st === "string" ? st : prev.status,
-        leads_found:
-          typeof lf === "number"
-            ? lf
-            : lf != null && !Number.isNaN(Number(lf))
-              ? Number(lf)
-              : prev.leads_found,
-      }))
-    })()
-  }, [campaignId, pollStops])
-
-  useEffect(() => {
-    console.log("Manual trigger only - no auto run")
-  }, [])
+    if (!campaignId || pollStops) return
+    const st = (liveCampaign.status ?? campaign.status ?? "").toLowerCase()
+    const busy =
+      scrapeUi === "running" ||
+      st === "scraping" ||
+      st === "running" ||
+      st === "enriching"
+    if (!busy) return
+    const id = window.setInterval(() => {
+      void fetchCampaignDataRef.current()
+    }, SCRAPE_PROGRESS_POLL_MS)
+    return () => clearInterval(id)
+  }, [
+    campaignId,
+    pollStops,
+    scrapeUi,
+    liveCampaign.status,
+    campaign.status,
+  ])
 
   /** Refresh queue/stats when campaign_messages change (sends complete in background). */
   useEffect(() => {
@@ -476,10 +534,6 @@ export function CampaignDetailContent({
   useEffect(() => {
     if (!campaignId) return
 
-    const refetch = () => {
-      void fetchCampaignDataRef.current()
-    }
-
     const ch = supabase
       .channel(`campaign-leads-${campaignId}`)
       .on(
@@ -490,7 +544,17 @@ export function CampaignDetailContent({
           table: "leads",
           filter: `campaign_id=eq.${campaignId}`,
         },
-        refetch
+        (payload) => {
+          applyLeadRealtimePayload(
+            {
+              eventType: payload.eventType,
+              new: payload.new as Record<string, unknown> | null,
+              old: payload.old as Record<string, unknown> | null,
+            },
+            "campaign",
+            null
+          )
+        }
       )
       .subscribe()
 
@@ -507,7 +571,17 @@ export function CampaignDetailContent({
             table: "leads",
             filter: `audience_id=eq.${audId}`,
           },
-          refetch
+          (payload) => {
+            applyLeadRealtimePayload(
+              {
+                eventType: payload.eventType,
+                new: payload.new as Record<string, unknown> | null,
+                old: payload.old as Record<string, unknown> | null,
+              },
+              "audience",
+              String(audId)
+            )
+          }
         )
         .subscribe()
     }
@@ -516,7 +590,7 @@ export function CampaignDetailContent({
       void supabase.removeChannel(ch)
       if (ch2) void supabase.removeChannel(ch2)
     }
-  }, [campaignId, campaign.audience_id])
+  }, [campaignId, campaign.audience_id, applyLeadRealtimePayload])
 
   /** Gmail sync inserts inbound `messages` without updating `leads.status` — refetch so Leads tab matches inbox. */
   useEffect(() => {

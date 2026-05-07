@@ -36,18 +36,35 @@ export default async function DashboardLayout({
   })
 
   return (
-    <div className="relative isolate flex h-full min-h-0 overflow-hidden bg-[#030306] bg-[radial-gradient(ellipse_100%_70%_at_50%_-25%,rgba(59,130,246,0.12),transparent_52%),radial-gradient(ellipse_60%_45%_at_100%_50%,rgba(139,92,246,0.06),transparent_45%)] text-white">
-      <aside className="flex w-full flex-shrink-0 flex-row border-b border-white/[0.06] bg-zinc-950/85 backdrop-blur-2xl backdrop-saturate-150 lg:w-64 lg:flex-col lg:border-b-0 lg:border-r">
-        <div className="flex items-center border-r border-white/[0.06] p-4 lg:block lg:border-r-0 lg:border-b lg:border-white/[0.06] lg:p-6">
-          <Link
-            href="/"
-            className="bg-gradient-to-br from-white to-zinc-400 bg-clip-text text-xl font-bold tracking-tight text-transparent hover:opacity-90"
-          >
-            BaseFlow
+    <div className="relative isolate flex h-full min-h-0 overflow-hidden bg-[#070708] bg-[radial-gradient(ellipse_90%_55%_at_50%_-15%,rgba(74,222,128,0.07),transparent_50%),radial-gradient(ellipse_55%_40%_at_100%_20%,rgba(167,139,250,0.06),transparent_48%)] text-white">
+      <aside className="flex w-full flex-shrink-0 flex-row border-b border-white/[0.06] bg-[#0a0a0c]/95 backdrop-blur-2xl backdrop-saturate-150 lg:w-64 lg:flex-col lg:border-b-0 lg:border-r lg:border-white/[0.06]">
+        <div className="flex items-center gap-3 border-r border-white/[0.06] p-4 lg:block lg:border-r-0 lg:border-b lg:border-white/[0.06] lg:p-6">
+          <Link href="/" className="flex items-center gap-3 hover:opacity-95">
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500/25 to-violet-600/10 ring-1 ring-violet-400/20">
+              <svg
+                className="size-5 text-violet-300"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+                aria-hidden
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M13 10V3L4 14h7v7l9-11h-7z"
+                />
+              </svg>
+            </span>
+            <span>
+              <span className="block text-lg font-bold tracking-tight text-white">
+                BaseFlow
+              </span>
+              <span className="mt-0.5 hidden text-[11px] font-medium tracking-wide text-zinc-500 lg:block">
+                Outreach workspace
+              </span>
+            </span>
           </Link>
-          <p className="mt-0.5 hidden text-xs tracking-wide text-zinc-500 lg:block">
-            Automation control
-          </p>
         </div>
         <SidebarNav />
         <div className="mt-auto hidden flex-col space-y-2 border-t border-white/[0.06] p-4 lg:flex">
